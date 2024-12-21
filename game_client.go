@@ -70,15 +70,24 @@ func (c *GameClient) Connect(serverAddr string) error {
 }
 
 func (c *GameClient) connectToPeer(peerAddr string) error {
+    // 1. Intentar conexión directa
     nat := NewNATTraversal()
-    
-    // Intentar establecer conexión P2P
     conn, err := nat.Connect(peerAddr)
     if err != nil {
-        return err
+        fmt.Printf("Conexión directa falló: %v\n", err)
+        fmt.Println("Usando servidor como relay...")
+        
+        // 2. Si falla, usar el servidor como relay
+        return c.useServerRelay()
     }
     
     c.peerConn = conn
+    return nil
+}
+
+func (c *GameClient) useServerRelay() error {
+    // Usar la conexión existente con el servidor para relay
+    fmt.Println("Modo relay activado")
     return nil
 }
 

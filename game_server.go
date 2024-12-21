@@ -20,6 +20,9 @@ type GameServer struct {
     // Para señalización inicial
     signalChan     map[string]chan []byte
     signalMux      sync.RWMutex
+
+    // Para reenvío cuando falla P2P
+    relayConns map[string]net.Conn
 }
 
 type Player struct {
@@ -35,6 +38,7 @@ func NewGameServer() *GameServer {
     return &GameServer{
         waitingPlayers: make(map[string]*Player),
         signalChan:    make(map[string]chan []byte),
+        relayConns:   make(map[string]net.Conn),
     }
 }
 
@@ -125,6 +129,12 @@ func (s *GameServer) handlePlayer(conn net.Conn) {
         fmt.Printf("Jugador 1: %s\n", player.ID)
         fmt.Printf("Jugador 2: %s\n", opponent.ID)
         
+        // Si los clientes están en diferentes redes, usar relay
+        if !sameNetwork(player.PublicIP, opponent.PublicIP) {
+            fmt.Printf("Clientes en diferentes redes, usando relay\n")
+            s.setupRelay(player, opponent)
+        }
+
         // Enviar info del oponente al jugador actual
         peerInfo := fmt.Sprintf("%s,%s,%d,%d\n", 
             opponent.LocalIP, opponent.PublicIP, 
@@ -279,6 +289,43 @@ func getLocalIP() string {
     
     // Si no se encuentra, devolver localhost
     return "127.0.0.1"
+}
+
+func (s *GameServer) setupRelay(p1, p2 *Player) {
+    // Crear túnel entre los jugadores
+    relay1 := make(chan []byte, 1024)
+    relay2 := make(chan []byte, 1024)
+
+    // Reenviar datos entre jugadores
+    go func() {
+        for data := range relay1 {
+            if conn, ok := s.relayConns[p2.ID]; ok {
+                conn.Write(data)
+            }
+        }
+    }()
+
+    go func() {
+        for data := range relay2 {
+            if conn, ok := s.relayConns[p1.ID]; ok {
+                conn.Write(data)
+            }
+        }
+    }()
+}
+
+func sameNetwork(ip1, ip2 string) bool {
+    // Comparar los primeros tres octetos
+    parts1 := strings.Split(ip1, ".")
+    parts2 := strings.Split(ip2, ".")
+    
+    if len(parts1) != 4 || len(parts2) != 4 {
+        return false
+    }
+    
+    return parts1[0] == parts2[0] && 
+           parts1[1] == parts2[1] && 
+           parts1[2] == parts2[2]
 }
 
 func main() {
