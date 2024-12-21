@@ -1,0 +1,187 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <meta charset="UTF-8">
+    <link rel="icon" type="image/x-icon" href="assets/favicon.ico">
+    <meta http-equiv="Content-Security-Policy"
+        content="default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; connect-src 'self' http://localhost:8080">
+    <title>Warcraft Launcher</title>
+    <script src="wasm_exec.js"></script>
+    <script>
+        window.getIP = async function(url) {
+            try {
+                const response = await fetch(url);
+                const data = await response.json();
+                return data.ip || '';
+            } catch (err) {
+                console.error('Error getting IP:', err);
+                return '';
+            }
+        };
+
+        const go = new Go();
+        WebAssembly.instantiateStreaming(fetch("wasm/game.wasm"), go.importObject)
+            .then((result) => {
+                go.run(result.instance);
+            })
+            .catch(err => console.error('Error cargando WASM:', err));
+
+        async function selectAndUpdatePath() {
+            try {
+                const path = await window.electron.selectFile();
+                if (path) {
+                    updateGamePath(path);
+                }
+            } catch (err) {
+                console.error('Error seleccionando archivo:', err);
+            }
+        }
+
+        // Función para mostrar información P2P
+        async function showPeerInfo() {
+            try {
+                const peerInfoStr = getPeerInfo();
+                const peerInfo = JSON.parse(peerInfoStr);
+                const display = document.getElementById('peerInfoDisplay');
+
+                let html = `
+                    <h3>ID: ${peerInfo.id}</h3>
+                    <h4>Direcciones:</h4>
+                    <ul>
+                        ${peerInfo.addresses.map(addr => `
+                            <li>
+                                ${addr}
+                                <button onclick="navigator.clipboard.writeText('${addr}')" class="copy-button">
+                                    Copiar
+                                </button>
+                            </li>
+                        `).join('')}
+                    </ul>
+                `;
+
+                if (peerInfo.name) {
+                    html += `<p>Nombre: ${peerInfo.name}</p>`;
+                }
+
+                display.innerHTML = html;
+            } catch (err) {
+                console.error('Error mostrando información P2P:', err);
+                document.getElementById('peerInfoDisplay').innerHTML =
+                    `<p class="error">Error: ${err.message}</p>`;
+            }
+        }
+
+        // Función para conectar con otro peer
+        async function connectWithPeer() {
+            const peerAddr = document.getElementById('peerAddress').value;
+            if (!peerAddr) {
+                alert('Por favor ingresa una dirección de peer');
+                return;
+            }
+            const result = connectToPeer(peerAddr);
+            alert(result);
+        }
+
+        // Manejar eventos de mensajes P2P
+        document.addEventListener('gameMessage', function (e) {
+            console.log('Mensaje de juego recibido:', e.detail);
+            const messagesList = document.getElementById('messagesList');
+            if (messagesList) {
+                const li = document.createElement('li');
+                li.textContent = e.detail;
+                messagesList.appendChild(li);
+            }
+        });
+    </script>
+    <style>
+        body {
+            padding: 20px;
+            font-family: Arial, sans-serif;
+        }
+
+        .button {
+            margin: 10px 0;
+            padding: 8px 16px;
+            background-color: #4CAF50;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+
+        .button:disabled {
+            background-color: #cccccc;
+            cursor: not-allowed;
+        }
+
+        #peerInfo {
+            margin-top: 20px;
+            padding: 10px;
+            background-color: #f0f0f0;
+            border-radius: 4px;
+        }
+
+        #peerInfoDisplay {
+            margin-top: 10px;
+            padding: 10px;
+            background-color: white;
+            border-radius: 4px;
+        }
+
+        .error {
+            color: red;
+        }
+
+        #messagesList {
+            margin-top: 10px;
+            padding: 10px;
+            background-color: white;
+            border-radius: 4px;
+            max-height: 200px;
+            overflow-y: auto;
+        }
+
+        .peer-connect {
+            margin-top: 20px;
+            padding: 10px;
+            background-color: #e0e0e0;
+            border-radius: 4px;
+        }
+
+        input[type="text"] {
+            padding: 8px;
+            margin-right: 10px;
+            border-radius: 4px;
+            border: 1px solid #ccc;
+            width: 300px;
+        }
+    </style>
+</head>
+
+<body>
+    <h1>Warcraft Launcher</h1>
+    <div>
+        <button onclick="selectAndUpdatePath()" class="button">Seleccionar ejecutable de Warcraft</button>
+    </div>
+    <button onclick="launchGame()" id="launchButton" class="button" disabled>Iniciar Warcraft</button>
+
+    <div id="peerInfo">
+        <h2>Información P2P</h2>
+        <button onclick="showPeerInfo()" class="button">Mostrar mi información</button>
+        <div id="peerInfoDisplay"></div>
+    </div>
+
+    <div class="peer-connect">
+        <h2>Conectar con otro jugador</h2>
+        <input type="text" id="peerAddress" placeholder="Ingresa la dirección del peer">
+        <button onclick="connectWithPeer()" class="button">Conectar</button>
+    </div>
+
+    <div id="messages">
+        <h2>Mensajes</h2>
+        <ul id="messagesList"></ul>
+    </div>
+</body>
+
+</html>
