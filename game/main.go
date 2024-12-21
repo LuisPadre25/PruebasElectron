@@ -111,10 +111,27 @@ func main() {
 	logMain("info", "Registrando callbacks...")
 	registerCallbacks()
 	
+	logMain("info", "Iniciando sistema P2P...")
+	defer func() {
+		if r := recover(); r != nil {
+			logMain("error", "Pánico en initP2P: %v", r)
+		}
+	}()
+
 	if err := initP2P(); err != nil {
 		logMain("error", "Error iniciando P2P: %v", err)
+		logMain("warn", "La funcionalidad P2P estará deshabilitada")
 	} else {
 		logMain("info", "P2P inicializado correctamente")
+		if node != nil {
+			logMain("info", "Nodo P2P activo con ID: %s", node.ID().String())
+			logMain("info", "Direcciones de escucha:")
+			for _, addr := range node.Addrs() {
+				logMain("info", "  • %s", addr.String())
+			}
+		} else {
+			logMain("error", "Nodo P2P es nil después de la inicialización")
+		}
 	}
 	
 	logMain("info", "WASM inicializado correctamente")
@@ -122,7 +139,7 @@ func main() {
 	defer func() {
 		logMain("info", "Limpiando callbacks...")
 		for _, cb := range callbacks {
-			cb.Release()
+				cb.Release()
 		}
 	}()
 	

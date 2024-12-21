@@ -237,6 +237,12 @@ func main() {
 	port := flag.Int("port", defaultPort, "Puerto del servidor")
 	flag.Parse()
 
+	logServer("info", "Iniciando servidor WebSocket en puerto %d", *port)
+	logServer("info", "Este servidor es independiente del nodo P2P que se ejecuta en WASM")
+
+	hub := newHub()
+	go hub.run()
+
 	// Verificar que el puerto está disponible antes de iniciar
 	addr := fmt.Sprintf(":%d", *port)
 	l, err := net.Listen("tcp", addr)
@@ -245,9 +251,6 @@ func main() {
 		os.Exit(1)
 	}
 	l.Close()
-
-	hub := newHub()
-	go hub.run()
 
 	// Configurar el logger
 	log.SetFlags(log.Ltime | log.Ldate)

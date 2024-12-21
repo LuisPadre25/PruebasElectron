@@ -1,13 +1,29 @@
 // Inicializar WASM
 const go = new Go();
+console.log('Iniciando carga de WASM...');
 WebAssembly.instantiateStreaming(fetch("wasm/game.wasm"), go.importObject)
     .then((result) => {
         debugLog('INIT', '✨ WASM inicializado correctamente');
         console.group('🚀 Iniciando aplicación');
-        go.run(result.instance);
+        try {
+            go.run(result.instance);
+        } catch (err) {
+            console.error('Error ejecutando WASM:', err);
+            debugLog('ERROR', '💥 Error ejecutando WASM:', err);
+        }
         console.groupEnd();
     })
-    .catch(err => debugLog('ERROR', '💥 Error cargando WASM:', err));
+    .catch(err => {
+        console.error('Error cargando WASM:', err);
+        debugLog('ERROR', '💥 Error cargando WASM:', err);
+        if (err instanceof WebAssembly.CompileError) {
+            console.error('Error compilando WASM:', err);
+        } else if (err instanceof WebAssembly.LinkError) {
+            console.error('Error enlazando WASM:', err);
+        } else if (err instanceof WebAssembly.RuntimeError) {
+            console.error('Error en tiempo de ejecución WASM:', err);
+        }
+    });
 
 // Función de debug mejorada con símbolos visuales
 function debugLog(category, message, data = null) {

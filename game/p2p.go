@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"strings"
 	"syscall/js"
 	"time"
 
@@ -212,54 +213,58 @@ func findAvailablePort(startPort, endPort int) int {
 }
 
 func initP2P() error {
+	defer func() {
+		if r := recover(); r != nil {
+			logP2P("error", "Pánico en initP2P: %v", r)
+		}
+	}()
+
 	logP2P("info", "Iniciando sistema P2P...")
 	
-	var err error
 	ctx = context.Background()
 
 	// Obtener la IP del servidor
 	localIP := getServerIP()
 	logP2P("info", "IP del servidor: %s", localIP)
 
-	// Usar puertos fijos para mejor predictibilidad
-	wsPort := 9100  // Puerto WebSocket fijo
-	tcpPort := 9101 // Puerto TCP fijo
-
-	logP2P("info", "Intentando configurar puertos - WS: %d, TCP: %d", wsPort, tcpPort)
-
-	// Verificar que los puertos estén realmente disponibles antes de continuar
-	for _, port := range []int{wsPort, tcpPort} {
-			addr := fmt.Sprintf("%s:%d", localIP, port)
-			logP2P("info", "Verificando disponibilidad del puerto %d en %s", port, addr)
-			l, err := net.Listen("tcp", addr)
-			if err != nil {
-				logP2P("error", "Puerto %d no disponible: %v", port, err)
-				return fmt.Errorf("puerto %d no disponible", port)
-			}
-			logP2P("info", "Puerto %d disponible", port)
-			l.Close()
+	// Verificar que la IP no sea vacía o inválida
+	if localIP == "" || localIP == "0.0.0.0" {
+		logP2P("error", "IP inválida obtenida")
+		return fmt.Errorf("IP inválida")
 	}
 
-	// Lista de direcciones para escuchar
+	// Usar puertos fijos para mejor predictibilidad
+	wsPort := 9100  // Puerto WebSocket fijo
+
+	logP2P("info", "Iniciando configuración de puerto P2P...")
+	logP2P("info", "• Puerto P2P WebSocket: %d", wsPort)
+
+	// Intentar primero con solo WebSocket
 	listenAddrs := []string{
-		fmt.Sprintf("/ip4/%s/tcp/%d", localIP, tcpPort),
 		fmt.Sprintf("/ip4/%s/tcp/%d/ws", localIP, wsPort),
 	}
 
-	logP2P("info", "Configurando direcciones de escucha:")
+	logP2P("info", "Configurando dirección de escucha P2P:")
 	for _, addr := range listenAddrs {
 		logP2P("info", "  • %s", addr)
 	}
 
-	logP2P("info", "Creando nodo P2P con configuración:")
-	logP2P("info", "  • Transporte: WebSocket")
-	logP2P("info", "  • NAT: Habilitado")
-	logP2P("info", "  • Hole Punching: Habilitado")
-	logP2P("info", "  • Relay: Deshabilitado")
+	logP2P("info", "Verificando que el puerto %d no esté en uso por el servidor WebSocket...", wsPort)
+	conn, err := net.Dial("tcp", fmt.Sprintf("localhost:%d", wsPort))
+	if err == nil {
+		conn.Close()
+		logP2P("error", "Puerto %d está en uso por otro servicio", wsPort)
+		return fmt.Errorf("puerto %d en uso", wsPort)
+	}
 
-	// Configuración del nodo P2P
-	node, err = libp2p.New(
-		libp2p.ListenAddrStrings(listenAddrs...),
+	logP2P("info", "Creando nodo P2P...")
+	nodeChan := make(chan host.Host)
+	errChan := make(chan error)
+	
+	go func() {
+		logP2P("info", "Iniciando creación del nodo P2P...")
+		n, err := libp2p.New(
+			libp2p.ListenAddrStrings(listenAddrs...),
 			libp2p.DefaultSecurity,
 			libp2p.DefaultMuxers,
 			libp2p.Transport(websocket.New),
@@ -267,26 +272,55 @@ func initP2P() error {
 			libp2p.EnableNATService(),
 			libp2p.NATPortMap(),
 			libp2p.EnableHolePunching(),
-	)
-	if err != nil {
-		logP2P("error", "Error creando nodo P2P: %v", err)
-		return fmt.Errorf("error creando nodo p2p: %v", err)
+		)
+		if err != nil {
+			logP2P("error", "Error creando nodo P2P: %v", err)
+			errChan <- err
+			return
+		}
+		nodeChan <- n
+	}()
+
+	select {
+	case n := <-nodeChan:
+		node = n
+		logP2P("info", "Nodo P2P creado exitosamente")
+		logP2P("info", "ID del nodo: %s", node.ID().String())
+	case err := <-errChan:
+		logP2P("error", "Error creando nodo: %v", err)
+		return err
+	case <-time.After(5 * time.Second):
+		logP2P("error", "Timeout creando nodo")
+		return fmt.Errorf("timeout creando nodo")
 	}
 
-	logP2P("info", "Nodo P2P creado con ID: %s", node.ID().String())
+	// Verificar que el nodo está escuchando correctamente
+	time.Sleep(time.Second) // Dar tiempo para que las direcciones se registren
+	addrs := node.Addrs()
+	if len(addrs) == 0 {
+		logP2P("error", "El nodo no tiene direcciones de escucha")
+		return fmt.Errorf("nodo sin direcciones")
+	}
 
-	// Verificar que el nodo está escuchando en las direcciones correctas
-	actualAddrs := node.Addrs()
 	logP2P("info", "Direcciones activas del nodo:")
-	for _, addr := range actualAddrs {
+	for _, addr := range addrs {
 		logP2P("info", "  • %s", addr.String())
 	}
 
-	logP2P("info", "Configurando manejador de streams para protocolo /warcraft/lan/1.0.0")
-	node.SetStreamHandler("/warcraft/lan/1.0.0", handleStream)
+	// Verificar conectividad básica
+	go func() {
+		time.Sleep(time.Second)
+		for _, addr := range addrs {
+			logP2P("info", "Verificando conectividad en %s", addr.String())
+			if strings.Contains(addr.String(), "ws") {
+				// Intentar conexión WebSocket
+				wsAddr := fmt.Sprintf("ws://%s:%d", localIP, wsPort)
+				logP2P("info", "Probando WebSocket en %s", wsAddr)
+			}
+		}
+	}()
 
 	logP2P("info", "Nodo P2P inicializado correctamente")
-	logP2P("info", "Esperando conexiones entrantes...")
 	return nil
 }
 
@@ -372,50 +406,48 @@ func connectToPeer() js.Func {
 		peerAddr := args[0].String()
 		logP2P("info", "Analizando dirección del peer: %s", peerAddr)
 
+		// Verificar que nuestro nodo está activo
+		if node == nil {
+			logP2P("error", "Nodo P2P no inicializado")
+			return "Error: Nodo P2P no inicializado"
+		}
+
 		ma, err := multiaddr.NewMultiaddr(peerAddr)
 		if err != nil {
 			logP2P("error", "Error en la dirección: %v", err)
 			return fmt.Sprintf("Error en la dirección del peer: %v", err)
 		}
 
+		// Extraer componentes de la dirección
 		ip, err := ma.ValueForProtocol(multiaddr.P_IP4)
 		if err != nil {
-			logP2P("error", "No se pudo extraer IP de la dirección: %v", err)
+			logP2P("error", "No se pudo extraer IP: %v", err)
 			return "Dirección IP no válida"
 		}
 
 		port, err := ma.ValueForProtocol(multiaddr.P_TCP)
 		if err != nil {
-			logP2P("error", "No se pudo extraer puerto de la dirección: %v", err)
+			logP2P("error", "No se pudo extraer puerto: %v", err)
 			return "Puerto no válido"
 		}
 
-		logP2P("info", "Verificando conectividad básica con %s:%s", ip, port)
-		tcpAddr := fmt.Sprintf("%s:%s", ip, port)
-		logP2P("info", "Intentando conexión TCP a %s", tcpAddr)
-		conn, err := net.DialTimeout("tcp", tcpAddr, 5*time.Second)
-		if err != nil {
-			logP2P("warn", "Conexión TCP fallida: %v", err)
-			wsAddr := fmt.Sprintf("%s:%s/ws", ip, port)
-			logP2P("info", "Intentando conexión WebSocket a %s", wsAddr)
-		} else {
-			conn.Close()
-			logP2P("info", "Conexión TCP exitosa")
+		// Obtener nuestra IP local
+		localIP := getServerIP()
+		wsPort := 9100  // Puerto WebSocket fijo
+
+		// Verificar si estamos intentando conectarnos a nosotros mismos
+		if ip == localIP && port == fmt.Sprintf("%d", wsPort) {
+			logP2P("error", "Intento de conexión a sí mismo")
+			return "Error: No puedes conectarte a tu propia dirección"
 		}
 
+		logP2P("info", "Intentando conexión a %s:%s", ip, port)
+
+		// Obtener información del peer
 		peerinfo, err := peer.AddrInfoFromP2pAddr(ma)
 		if err != nil {
 			logP2P("error", "Error obteniendo info del peer: %v", err)
 			return fmt.Sprintf("Error obteniendo info del peer: %v", err)
-		}
-
-		logP2P("info", "Información del peer objetivo:")
-		logP2P("info", "  • ID: %s", peerinfo.ID.String())
-		logP2P("info", "  • Direcciones: %v", peerinfo.Addrs)
-
-		if peerinfo.ID == node.ID() {
-			logP2P("error", "Intento de conexión a sí mismo detectado")
-			return "Error: No puedes conectarte a tu propia dirección"
 		}
 
 		// Crear contexto con timeout
@@ -426,7 +458,7 @@ func connectToPeer() js.Func {
 		maxRetries := 3
 		for i := 0; i < maxRetries; i++ {
 			logP2P("info", "Intento de conexión %d/%d al peer %s", i+1, maxRetries, peerinfo.ID.String())
-
+			
 			err := node.Connect(ctx, *peerinfo)
 			if err == nil {
 				logP2P("info", "✅ Conexión establecida exitosamente con %s", peerinfo.ID.String())
@@ -493,26 +525,18 @@ func logNetworkEvent(eventType string, peerID peer.ID, addr multiaddr.Multiaddr)
 	js.Global().Get("console").Call("group", fmt.Sprintf("🌐 Evento de red: %s", eventType))
 	js.Global().Get("console").Call("log", " Peer ID:", peerID.String())
 	js.Global().Get("console").Call("log", "🔹 Dirección:", addr.String())
-	js.Global().Get("console").Call("log", "🔹 Timestamp:", time.Now().Format(time.RFC3339))
+	js.Global().Get("console").Call("log", " Timestamp:", time.Now().Format(time.RFC3339))
 	js.Global().Get("console").Call("groupEnd")
 }
 
 // Agregar nueva función para verificar puerto
 func checkPortAvailable(ip string, port int) error {
-	// Intentar escuchar en el puerto específico
+	// Intentar escuchar en el puerto
 	addr := fmt.Sprintf("%s:%d", ip, port)
-	listener, err := net.Listen("tcp", addr)
+	l, err := net.Listen("tcp", addr)
 	if err != nil {
-		return err
+		return fmt.Errorf("puerto no disponible: %v", err)
 	}
-	defer listener.Close()
-
-	// Verificar que podemos conectarnos al puerto
-	conn, err := net.Dial("tcp", addr)
-	if err != nil {
-		return fmt.Errorf("no se puede conectar al puerto: %v", err)
-	}
-	conn.Close()
-
+	l.Close()
 	return nil
 } 
