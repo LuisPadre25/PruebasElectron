@@ -274,6 +274,34 @@ func (c *GameClient) connectTCP() error {
     return nil
 }
 
+func (c *GameClient) discoverServer() (string, error) {
+    // Crear socket UDP para broadcast
+    conn, err := net.DialUDP("udp", nil, &net.UDPAddr{
+        IP:   net.IPv4(255, 255, 255, 255),
+        Port: 5001,
+    })
+    if err != nil {
+        return "", err
+    }
+    defer conn.Close()
+
+    // Enviar mensaje de descubrimiento
+    fmt.Println("Buscando servidor...")
+    conn.Write([]byte("DISCOVER_GAME_SERVER"))
+
+    // Esperar respuesta
+    buffer := make([]byte, 1024)
+    conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+    n, _, err := conn.ReadFromUDP(buffer)
+    if err != nil {
+        return "", fmt.Errorf("no se encontró servidor: %v", err)
+    }
+
+    serverAddr := string(buffer[:n])
+    fmt.Printf("Servidor encontrado en %s\n", serverAddr)
+    return serverAddr, nil
+}
+
 // Función principal para usar el cliente
 func main() {
     fmt.Println("\n=== Cliente de Juegos P2P ===")
@@ -288,9 +316,18 @@ func main() {
     }
 
     fmt.Printf("Usando puertos - UDP: %d, TCP: %d\n", udpPort, tcpPort)
-    fmt.Println("Descubriendo direcciones IP...")
-    
-    err := client.Connect("localhost:5000")
+
+    // Descubrir servidor automáticamente
+    serverAddr, err := client.discoverServer()
+    if err != nil {
+        fmt.Printf("Error descubriendo servidor: %v\n", err)
+        fmt.Println("\nPresiona Enter para salir...")
+        fmt.Scanln()
+        return
+    }
+
+    // Conectar al servidor descubierto
+    err = client.Connect(serverAddr)
     if err != nil {
         fmt.Printf("Error conectando: %v\n", err)
         fmt.Println("\nPresiona Enter para salir...")
@@ -300,7 +337,6 @@ func main() {
 
     fmt.Println("Conectado exitosamente!")
     
-    // Mantener el programa corriendo
     fmt.Println("\nPresiona Enter para salir...")
     fmt.Scanln()
 } 

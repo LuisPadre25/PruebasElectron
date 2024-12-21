@@ -39,6 +39,9 @@ func NewGameServer() *GameServer {
 }
 
 func (s *GameServer) Start() error {
+    // Iniciar servicio de descubrimiento
+    go s.startDiscoveryService()
+
     // Manejar señal de interrupción
     sigChan := make(chan os.Signal, 1)
     signal.Notify(sigChan, os.Interrupt)
@@ -226,6 +229,56 @@ func (s *GameServer) cleanup() {
         s.removePlayer(id)
     }
     s.playersMux.Unlock()
+}
+
+func (s *GameServer) startDiscoveryService() {
+    addr := &net.UDPAddr{
+        IP:   net.IPv4(0, 0, 0, 0),
+        Port: 5001, // Puerto para descubrimiento
+    }
+    
+    conn, err := net.ListenUDP("udp", addr)
+    if err != nil {
+        fmt.Printf("Error iniciando servicio de descubrimiento: %v\n", err)
+        return
+    }
+    defer conn.Close()
+
+    fmt.Println("Servicio de descubrimiento escuchando en :5001")
+
+    buffer := make([]byte, 1024)
+    for {
+        n, remoteAddr, err := conn.ReadFromUDP(buffer)
+        if err != nil {
+            continue
+        }
+
+        if string(buffer[:n]) == "DISCOVER_GAME_SERVER" {
+            // Enviar IP y puerto del servidor
+            response := fmt.Sprintf("%s:5000", getLocalIP())
+            conn.WriteToUDP([]byte(response), remoteAddr)
+            fmt.Printf("Cliente descubierto: %s\n", remoteAddr)
+        }
+    }
+}
+
+func getLocalIP() string {
+    addrs, err := net.InterfaceAddrs()
+    if err != nil {
+        return "127.0.0.1"
+    }
+    
+    // Primero buscar una IP no loopback
+    for _, addr := range addrs {
+        if ipnet, ok := addr.(*net.IPNet); ok && !ipnet.IP.IsLoopback() {
+            if ipnet.IP.To4() != nil {
+                return ipnet.IP.String()
+            }
+        }
+    }
+    
+    // Si no se encuentra, devolver localhost
+    return "127.0.0.1"
 }
 
 func main() {
