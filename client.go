@@ -2,6 +2,7 @@ package main
 
 import (
     "bufio"
+    "encoding/json"
     "fmt"
     "net"
     "os"
@@ -10,6 +11,20 @@ import (
     "syscall"
     "time"
 )
+
+const (
+    RECONNECT_DELAY   = 5 * time.Second
+    MAX_RETRIES       = 3
+    DEFAULT_PORT      = "6868"  // Puerto para el servidor rendezvous
+)
+
+type ClientInfo struct {
+    ID         string
+    PublicIP   string
+    PublicPort int
+    LocalIP    string
+    LocalPort  int
+}
 
 type Cliente struct {
     conn     net.Conn
@@ -188,15 +203,34 @@ func (c *Cliente) enviarMensajes() {
 }
 
 func (c *Cliente) Iniciar() error {
-    // Conectar al servidor
+    // Primero conectar al servidor de chat normal
     if err := c.conectarAlServidor(); err != nil {
         return err
     }
     defer c.conn.Close()
     
-    // Iniciar sesión
+    // Iniciar sesión para obtener el nombre
     if err := c.iniciarSesion(); err != nil {
         return err
+    }
+    
+    // Ahora intentar conectar al servidor rendezvous
+    var retries int
+    for {
+        err := c.connectToRendezvous()
+        if err == nil {
+            break
+        }
+        
+        retries++
+        if retries >= MAX_RETRIES {
+            fmt.Printf("No se pudo conectar al servidor rendezvous después de %d intentos\n", MAX_RETRIES)
+            break // Continuamos sin P2P
+        }
+        
+        fmt.Printf("Error conectando al servidor rendezvous: %v\n", err)
+        fmt.Printf("Reintentando en %v...\n", RECONNECT_DELAY)
+        time.Sleep(RECONNECT_DELAY)
     }
     
     // Configurar cierre limpio
@@ -230,4 +264,134 @@ func main() {
         bufio.NewReader(os.Stdin).ReadString('\n')
         os.Exit(1)
     }
+}
+
+type PeerConnection struct {
+    ID        string
+    PublicIP  string
+    PublicPort int
+    LocalIP   string
+    LocalPort int
+    conn      net.Conn
+}
+
+func (c *Cliente) connectToRendezvous() error {
+    reader := bufio.NewReader(os.Stdin)
+    
+    fmt.Println("\n=== Conexión al Servidor Rendezvous ===")
+    
+    fmt.Print("Ingrese la dirección IP del servidor rendezvous: ")
+    ip, _ := reader.ReadString('\n')
+    ip = strings.TrimSpace(ip)
+    
+    // Verificar si la dirección ya incluye el puerto
+    if !strings.Contains(ip, ":") {
+        ip = ip + ":" + DEFAULT_PORT
+    }
+    
+    fmt.Printf("\nIntentando conectar al servidor rendezvous en %s...\n", ip)
+    
+    conn, err := net.Dial("tcp", ip)
+    if err != nil {
+        return fmt.Errorf("error conectando al servidor rendezvous: %v", err)
+    }
+    
+    // Enviar información local
+    localAddr := conn.LocalAddr().(*net.TCPAddr)
+    info := ClientInfo{
+        ID:        c.nombre,
+        LocalIP:   localAddr.IP.String(),
+        LocalPort: localAddr.Port,
+    }
+    
+    encoder := json.NewEncoder(conn)
+    if err := encoder.Encode(info); err != nil {
+        return err
+    }
+    
+    // Recibir lista de peers
+    decoder := json.NewDecoder(conn)
+    peers := make(map[string]*ClientInfo)
+    if err := decoder.Decode(&peers); err != nil {
+        return err
+    }
+    
+    fmt.Printf("Conectado al servidor rendezvous. Peers disponibles: %d\n", len(peers))
+    
+    // Intentar conectar con cada peer
+    for id, peer := range peers {
+        if id != c.nombre {
+            go c.tryConnectToPeer(peer)
+        }
+    }
+    
+    return nil
+}
+
+func (c *Cliente) tryConnectToPeer(peer *ClientInfo) {
+    // Intentar conexión directa
+    conn, err := net.DialTimeout("tcp", fmt.Sprintf("%s:%d", peer.PublicIP, peer.PublicPort), 5*time.Second)
+    if err != nil {
+        // Si falla, intentar hole punching
+        c.holePunching(peer)
+        return
+    }
+    
+    c.handlePeerConnection(conn, peer.ID)
+}
+
+func (c *Cliente) holePunching(peer *ClientInfo) {
+    // Crear socket UDP local
+    localAddr := &net.UDPAddr{IP: net.ParseIP("0.0.0.0"), Port: 0}
+    conn, err := net.ListenUDP("udp", localAddr)
+    if err != nil {
+        return
+    }
+    
+    // Enviar paquetes UDP al peer (público y local)
+    peerPublic := &net.UDPAddr{IP: net.ParseIP(peer.PublicIP), Port: peer.PublicPort}
+    peerLocal := &net.UDPAddr{IP: net.ParseIP(peer.LocalIP), Port: peer.LocalPort}
+    
+    // Enviar paquetes para abrir el NAT
+    conn.WriteToUDP([]byte("hole-punching"), peerPublic)
+    conn.WriteToUDP([]byte("hole-punching"), peerLocal)
+    
+    // Esperar respuesta
+    buffer := make([]byte, 1024)
+    conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+    
+    _, addr, err := conn.ReadFromUDP(buffer)
+    if err != nil {
+        return
+    }
+    
+    // Establecer conexión TCP después del hole punching
+    tcpConn, err := net.DialTCP("tcp", nil, &net.TCPAddr{
+        IP:   addr.IP,
+        Port: addr.Port,
+    })
+    
+    if err == nil {
+        c.handlePeerConnection(tcpConn, peer.ID)
+    }
+}
+
+func (c *Cliente) handlePeerConnection(conn net.Conn, peerID string) {
+    fmt.Printf("Conexión P2P establecida con %s (%s)\n", peerID, conn.RemoteAddr())
+    
+    // Crear un nuevo reader para esta conexión
+    reader := bufio.NewReader(conn)
+    
+    // Goroutine para recibir mensajes
+    go func() {
+        for {
+            mensaje, err := reader.ReadString('\n')
+            if err != nil {
+                fmt.Printf("Conexión con peer %s cerrada\n", peerID)
+                conn.Close()
+                return
+            }
+            fmt.Printf("[%s] %s", peerID, mensaje)
+        }
+    }()
 } 
