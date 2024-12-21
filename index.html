@@ -9,13 +9,45 @@
     <title>Warcraft Launcher</title>
     <script src="wasm_exec.js"></script>
     <script>
+        // Sistema de logs para el cliente
+        const logClient = {
+            info: (message, ...args) => {
+                console.log('🎮 [Client]', message, ...args);
+                updateDebugLog('info', message, args);
+            },
+            warn: (message, ...args) => {
+                console.warn('⚠️ [Client]', message, ...args);
+                updateDebugLog('warn', message, args);
+            },
+            error: (message, ...args) => {
+                console.error('❌ [Client]', message, ...args);
+                updateDebugLog('error', message, args);
+            }
+        };
+
+        // Función para actualizar el log visual
+        function updateDebugLog(level, message, args) {
+            const debugLog = document.getElementById('debugLog');
+            if (!debugLog) return;
+
+            const entry = document.createElement('div');
+            entry.className = `debug-entry ${level}`;
+            
+            const timestamp = new Date().toLocaleTimeString();
+            const icon = level === 'error' ? '❌' : level === 'warn' ? '⚠️' : '🎮';
+            
+            entry.textContent = `${timestamp} ${icon} ${message} ${args.length ? JSON.stringify(args) : ''}`;
+            debugLog.appendChild(entry);
+            debugLog.scrollTop = debugLog.scrollHeight;
+        }
+
         window.getIP = async function(url) {
             try {
                 const response = await fetch(url);
                 const data = await response.json();
                 return data.ip || '';
             } catch (err) {
-                console.error('Error getting IP:', err);
+                logClient.error('Error obteniendo IP:', err);
                 return '';
             }
         };
@@ -23,26 +55,33 @@
         const go = new Go();
         WebAssembly.instantiateStreaming(fetch("wasm/game.wasm"), go.importObject)
             .then((result) => {
+                logClient.info('WASM cargado correctamente');
                 go.run(result.instance);
             })
-            .catch(err => console.error('Error cargando WASM:', err));
+            .catch(err => {
+                logClient.error('Error cargando WASM:', err);
+            });
 
         async function selectAndUpdatePath() {
             try {
+                logClient.info('Seleccionando archivo...');
                 const path = await window.electron.selectFile();
                 if (path) {
+                    logClient.info('Archivo seleccionado:', path);
                     updateGamePath(path);
                 }
             } catch (err) {
-                console.error('Error seleccionando archivo:', err);
+                logClient.error('Error seleccionando archivo:', err);
             }
         }
 
         // Función para mostrar información P2P
         async function showPeerInfo() {
             try {
+                logClient.info('Obteniendo información P2P...');
                 const peerInfoStr = getPeerInfo();
                 const peerInfo = JSON.parse(peerInfoStr);
+                logClient.info('Información P2P obtenida:', peerInfo);
                 const display = document.getElementById('peerInfoDisplay');
 
                 let html = `
@@ -66,7 +105,7 @@
 
                 display.innerHTML = html;
             } catch (err) {
-                console.error('Error mostrando información P2P:', err);
+                logClient.error('Error mostrando información P2P:', err);
                 document.getElementById('peerInfoDisplay').innerHTML =
                     `<p class="error">Error: ${err.message}</p>`;
             }
@@ -76,16 +115,21 @@
         async function connectWithPeer() {
             const peerAddr = document.getElementById('peerAddress').value;
             if (!peerAddr) {
-                alert('Por favor ingresa una dirección de peer');
+                logClient.warn('No se proporcionó dirección de peer');
                 return;
             }
+            logClient.info('Intentando conectar con peer:', peerAddr);
             const result = connectToPeer(peerAddr);
-            alert(result);
+            if (result.includes('Error')) {
+                logClient.error('Error conectando con peer:', result);
+            } else {
+                logClient.info('Conexión exitosa:', result);
+            }
         }
 
         // Manejar eventos de mensajes P2P
         document.addEventListener('gameMessage', function (e) {
-            console.log('Mensaje de juego recibido:', e.detail);
+            logClient.info('Mensaje de juego recibido:', e.detail);
             const messagesList = document.getElementById('messagesList');
             if (messagesList) {
                 const li = document.createElement('li');
@@ -156,6 +200,30 @@
             border: 1px solid #ccc;
             width: 300px;
         }
+
+        /* Estilos para el debug log */
+        #debugLog {
+            position: fixed;
+            bottom: 0;
+            right: 0;
+            width: 400px;
+            height: 200px;
+            background: rgba(0, 0, 0, 0.8);
+            color: #fff;
+            font-family: monospace;
+            font-size: 12px;
+            padding: 10px;
+            overflow-y: auto;
+            z-index: 9999;
+        }
+        .debug-entry {
+            margin: 2px 0;
+            padding: 2px 5px;
+            border-left: 3px solid #666;
+        }
+        .debug-entry.info { border-color: #4CAF50; }
+        .debug-entry.warn { border-color: #FFC107; }
+        .debug-entry.error { border-color: #f44336; }
     </style>
 </head>
 
@@ -182,6 +250,8 @@
         <h2>Mensajes</h2>
         <ul id="messagesList"></ul>
     </div>
+
+    <div id="debugLog"></div>
 </body>
 
 </html>

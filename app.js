@@ -2,28 +2,50 @@
 const go = new Go();
 WebAssembly.instantiateStreaming(fetch("wasm/game.wasm"), go.importObject)
     .then((result) => {
-        console.log('🚀 WASM inicializado correctamente');
+        debugLog('INIT', '✨ WASM inicializado correctamente');
+        console.group('🚀 Iniciando aplicación');
         go.run(result.instance);
+        console.groupEnd();
     })
-    .catch(err => console.error('❌ Error cargando WASM:', err));
+    .catch(err => debugLog('ERROR', '💥 Error cargando WASM:', err));
 
-// Función de debug
+// Función de debug mejorada con símbolos visuales
 function debugLog(category, message, data = null) {
-    const timestamp = new Date().toISOString();
-    const prefix = `[${category}] ${timestamp}:`;
+    const symbols = {
+        P2P: '🔗',
+        ERROR: '❌',
+        INIT: '🚀',
+        FILE: '📁',
+        GAME: '🎮',
+        WARN: '⚠️'
+    };
+
+    const timestamp = new Date().toLocaleTimeString();
+    const symbol = symbols[category] || '📌';
+    const prefix = `${symbol} [${category}] ${timestamp}:`;
     
+    // Colorear la consola según la categoría
+    const colors = {
+        P2P: 'color: #4CAF50',
+        ERROR: 'color: #f44336',
+        INIT: 'color: #2196F3',
+        FILE: 'color: #FF9800',
+        GAME: 'color: #9C27B0',
+        WARN: 'color: #FFC107'
+    };
+
     if (data) {
-        console.log(prefix, message, data);
+        console.log(`%c${prefix}`, colors[category], message, data);
     } else {
-        console.log(prefix, message);
+        console.log(`%c${prefix}`, colors[category], message);
     }
 
-    // Opcional: Mostrar en la UI
+    // UI logging se mantiene igual
     const debugDiv = document.getElementById('debugLog');
     if (debugDiv) {
         const logEntry = document.createElement('div');
         logEntry.className = `debug-entry ${category.toLowerCase()}`;
-        logEntry.textContent = `${prefix} ${message} ${data ? JSON.stringify(data) : ''}`;
+        logEntry.textContent = `${symbol} ${message} ${data ? JSON.stringify(data) : ''}`;
         debugDiv.appendChild(logEntry);
         debugDiv.scrollTop = debugDiv.scrollHeight;
     }
@@ -82,16 +104,28 @@ async function showPeerInfo() {
 async function connectWithPeer() {
     const peerAddr = document.getElementById('peerAddr').value;
     if (!peerAddr) {
-        debugLog('ERROR', 'Dirección del peer no proporcionada');
+        debugLog('ERROR', 'No se proporcionó dirección del peer');
         return;
     }
 
-    debugLog('P2P', 'Intentando conectar con peer:', peerAddr);
+    debugLog('P2P', '⏳ Iniciando conexión con peer...', peerAddr);
+    
     try {
+        console.group('🔗 Intento de conexión P2P');
+        debugLog('P2P', '🔍 Validando dirección del peer...');
         const result = connectToPeer(peerAddr);
-        debugLog('P2P', 'Resultado de la conexión:', result);
+        
+        if (result.includes('Error')) {
+            debugLog('ERROR', '❌ Falló la conexión:', result);
+        } else {
+            debugLog('P2P', '✅ Conexión establecida exitosamente');
+        }
+        console.groupEnd();
+        
+        return result;
     } catch (err) {
-        debugLog('ERROR', 'Error conectando con peer:', err);
+        console.groupEnd();
+        debugLog('ERROR', '💥 Error fatal en la conexión:', err);
     }
 }
 
@@ -110,11 +144,11 @@ document.addEventListener('DOMContentLoaded', () => {
 
     // Event listener para mensajes P2P
     document.addEventListener('gameMessage', function (e) {
-        debugLog('P2P', 'Mensaje de juego recibido:', e.detail);
+        debugLog('P2P', '📨 Nuevo mensaje recibido:', e.detail);
         const messagesList = document.getElementById('messagesList');
         if (messagesList) {
             const li = document.createElement('li');
-            li.textContent = e.detail;
+            li.textContent = `${new Date().toLocaleTimeString()} - ${e.detail}`;
             messagesList.appendChild(li);
         }
     });

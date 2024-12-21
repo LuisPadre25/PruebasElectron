@@ -30,10 +30,25 @@ var (
 	peerName string
 )
 
+func logP2P(category string, message string, args ...interface{}) {
+	console := js.Global().Get("console")
+	fullMessage := fmt.Sprintf(message, args...)
+	
+	switch category {
+	case "error":
+		console.Call("error", "❌ [P2P]", fullMessage)
+	case "warn":
+		console.Call("warn", "⚠️ [P2P]", fullMessage)
+	default:
+		console.Call("log", "🔗 [P2P]", fullMessage)
+	}
+}
+
 func getOutboundIP() string {
 	// Intentar obtener todas las interfaces de red
 	interfaces, err := net.Interfaces()
 	if err != nil {
+		logP2P("warn", "Error obteniendo interfaces de red: %v", err)
 		return "127.0.0.1"
 	}
 
@@ -46,6 +61,7 @@ func getOutboundIP() string {
 		// Obtener direcciones de la interfaz
 		addrs, err := iface.Addrs()
 		if err != nil {
+			logP2P("warn", "Error obteniendo direcciones para interfaz %s: %v", iface.Name, err)
 			continue
 		}
 
@@ -68,7 +84,7 @@ func getOutboundIP() string {
 				continue
 			}
 
-			js.Global().Get("console").Call("log", "Interfaz encontrada:", iface.Name, "IP:", ip.String())
+			logP2P("info", "Interfaz encontrada: %s, IP: %s", iface.Name, ip.String())
 			return ip.String()
 		}
 	}
@@ -76,6 +92,7 @@ func getOutboundIP() string {
 	// Si no se encuentra ninguna IP válida, intentar el método de conexión UDP
 	conn, err := net.Dial("udp", "8.8.8.8:80")
 	if err != nil {
+		logP2P("warn", "Error en conexión UDP de prueba: %v", err)
 		return "127.0.0.1"
 	}
 	defer conn.Close()
@@ -88,6 +105,7 @@ func getOutboundIP() string {
 func tryGetIP(done chan string, attempt int, maxRetries int, retryDelay time.Duration) {
 	electronObj := js.Global().Get("electron")
 	if electronObj.IsUndefined() || electronObj.IsNull() {
+		logP2P("warn", "Objeto electron no disponible")
 		done <- "127.0.0.1"
 		return
 	}
@@ -99,17 +117,19 @@ func tryGetIP(done chan string, attempt int, maxRetries int, retryDelay time.Dur
 		if len(args) > 0 && !args[0].IsNull() && !args[0].IsUndefined() {
 			result := args[0]
 			if !result.Get("ip").IsUndefined() {
-					ip := result.Get("ip").String()
-					done <- ip
-					return nil
+				ip := result.Get("ip").String()
+				logP2P("info", "IP obtenida del servidor: %s", ip)
+				done <- ip
+				return nil
 			}
 		}
 		
 		if attempt < maxRetries {
-			js.Global().Get("console").Call("log", "Reintentando obtener IP, intento:", attempt+1)
+			logP2P("info", "Reintentando obtener IP, intento: %d", attempt+1)
 			time.Sleep(retryDelay)
 			go tryGetIP(done, attempt+1, maxRetries, retryDelay)
 		} else {
+			logP2P("warn", "No se pudo obtener IP después de %d intentos", maxRetries)
 			done <- "127.0.0.1"
 		}
 		return nil
@@ -142,7 +162,7 @@ func getServerIP() string {
 	// Primero intentar obtener la IP local directamente
 	ip := getOutboundIP()
 	if ip != "127.0.0.1" {
-		js.Global().Get("console").Call("log", "IP obtenida localmente:", ip)
+		logP2P("info", "IP obtenida localmente: %s", ip)
 		return ip
 	}
 
@@ -162,12 +182,12 @@ func getServerIP() string {
 		case ip := <-done:
 			return ip
 		case <-time.After(time.Second * 15):
-			js.Global().Get("console").Call("warn", "Timeout obteniendo IP del servidor")
+			logP2P("warn", "Timeout obteniendo IP del servidor")
 			return "127.0.0.1"
 		}
 	}
 
-	js.Global().Get("console").Call("warn", "Electron no disponible, usando IP local")
+	logP2P("warn", "Electron no disponible, usando IP local")
 	return "127.0.0.1"
 }
 
@@ -185,22 +205,25 @@ func findAvailablePort(startPort, endPort int) int {
 }
 
 func initP2P() error {
+	logP2P("info", "Iniciando sistema P2P...")
+	
 	var err error
 	ctx = context.Background()
 
 	// Obtener la IP del servidor
 	localIP := getServerIP()
-	js.Global().Get("console").Call("log", "IP del servidor:", localIP)
+	logP2P("info", "IP del servidor: %s", localIP)
 
 	// Buscar puertos disponibles
 	wsPort := findAvailablePort(9100, 9200)
 	tcpPort := findAvailablePort(9201, 9300)
 
 	if wsPort == -1 || tcpPort == -1 {
+		logP2P("error", "No se encontraron puertos disponibles")
 		return fmt.Errorf("no se encontraron puertos disponibles")
 	}
 
-	js.Global().Get("console").Call("log", "Puertos seleccionados - WS:", wsPort, "TCP:", tcpPort)
+	logP2P("info", "Puertos asignados - WS: %d, TCP: %d", wsPort, tcpPort)
 
 	// Lista de direcciones para escuchar
 	listenAddrs := []string{
@@ -228,29 +251,37 @@ func initP2P() error {
 	js.Global().Get("console").Call("log", "ID del nodo:", node.ID().String())
 	for _, addr := range node.Addrs() {
 		fullAddr := fmt.Sprintf("%s/p2p/%s", addr.String(), node.ID().String())
-		js.Global().Get("console").Call("log", "Dirección de escucha:", fullAddr)
+		logP2P("info", "Dirección de escucha: %s", fullAddr)
 	}
 
 	// Configurar el manejador de streams
 	node.SetStreamHandler("/warcraft/lan/1.0.0", handleStream)
 
+	logP2P("info", "Nodo P2P inicializado correctamente")
 	return nil
 }
 
 func handleStream(stream network.Stream) {
 	defer stream.Close()
 
+	remotePeer := stream.Conn().RemotePeer()
+	remoteAddr := stream.Conn().RemoteMultiaddr()
+	
+	logP2P("info", "Nueva conexión entrante:")
+	logP2P("info", "  • Peer ID: %s", remotePeer.String())
+	logP2P("info", "  • Dirección: %s", remoteAddr.String())
+	logP2P("info", "  • Protocolo: %s", stream.Protocol())
+
 	// Leer el mensaje
 	buf := make([]byte, 1024)
 	n, err := stream.Read(buf)
 	if err != nil && err != io.EOF {
-		js.Global().Get("console").Call("error", "Error leyendo stream:", err.Error())
+		logP2P("error", "Error leyendo stream: %v", err)
 		return
 	}
 
-	// Procesar el mensaje
 	message := string(buf[:n])
-	js.Global().Get("console").Call("log", "Mensaje recibido:", message)
+	logP2P("info", "Mensaje recibido: %s", message)
 
 	// Emitir evento para la UI
 	js.Global().Get("document").Call("dispatchEvent",
@@ -305,27 +336,31 @@ func getPeerInfo() js.Func {
 func connectToPeer() js.Func {
 	return js.FuncOf(func(this js.Value, args []js.Value) interface{} {
 		if len(args) < 1 {
+			logP2P("error", "Se requiere la dirección del peer")
 			return "Se requiere la dirección del peer"
 		}
 
 		peerAddr := args[0].String()
-		js.Global().Get("console").Call("log", "Intentando conectar a:", peerAddr)
+		logP2P("info", "Iniciando conexión a peer: %s", peerAddr)
 
 		ma, err := multiaddr.NewMultiaddr(peerAddr)
 		if err != nil {
-			errMsg := fmt.Sprintf("Error en la dirección del peer: %v", err)
-			js.Global().Get("console").Call("error", errMsg)
-			return errMsg
+			logP2P("error", "Error en la dirección: %v", err)
+			return fmt.Sprintf("Error en la dirección del peer: %v", err)
 		}
 
 		peerinfo, err := peer.AddrInfoFromP2pAddr(ma)
 		if err != nil {
-			errMsg := fmt.Sprintf("Error obteniendo info del peer: %v", err)
-			js.Global().Get("console").Call("error", errMsg)
-			return errMsg
+			logP2P("error", "Error obteniendo info del peer: %v", err)
+			return fmt.Sprintf("Error obteniendo info del peer: %v", err)
 		}
 
+		logP2P("info", "Información del peer objetivo:")
+		logP2P("info", "  • ID: %s", peerinfo.ID.String())
+		logP2P("info", "  • Direcciones: %v", peerinfo.Addrs)
+
 		if peerinfo.ID == node.ID() {
+			logP2P("error", "Intento de conexión a sí mismo detectado")
 			return "Error: No puedes conectarte a tu propia dirección"
 		}
 
@@ -336,28 +371,23 @@ func connectToPeer() js.Func {
 		// Intentar la conexión con retry simple
 		maxRetries := 3
 		for i := 0; i < maxRetries; i++ {
-			js.Global().Get("console").Call("log", 
-				fmt.Sprintf("Intento de conexión %d/%d", i+1, maxRetries))
+			logP2P("info", "Intento de conexión %d/%d al peer %s", i+1, maxRetries, peerinfo.ID.String())
 
 			err := node.Connect(ctx, *peerinfo)
 			if err == nil {
-				js.Global().Get("console").Call("log", 
-					"Conexión establecida con:", peerinfo.ID.String())
+				logP2P("info", "✅ Conexión establecida exitosamente con %s", peerinfo.ID.String())
 				return "Conectado exitosamente"
 			}
 
-			js.Global().Get("console").Call("warn", 
-				fmt.Sprintf("Error en intento %d: %v", i+1, err))
+			logP2P("warn", "Intento %d fallido: %v", i+1, err)
 
 			if i < maxRetries-1 {
 				time.Sleep(2 * time.Second)
 			}
 		}
 
-		errMsg := fmt.Sprintf("No se pudo conectar al peer después de %d intentos. "+
-			"Verifica que ambos peers estén en la misma red y que los puertos no estén bloqueados.", 
-			maxRetries)
-		js.Global().Get("console").Call("error", errMsg)
+		errMsg := fmt.Sprintf("No se pudo conectar al peer después de %d intentos", maxRetries)
+		logP2P("error", errMsg)
 		return errMsg
 	})
 }
@@ -402,4 +432,13 @@ func printNodeInfo() {
 				fmt.Sprintf("- %s (%d)", comp.Name, comp.Code))
 		}
 	}
+}
+
+// Añadir función para loggear eventos de red
+func logNetworkEvent(eventType string, peerID peer.ID, addr multiaddr.Multiaddr) {
+	js.Global().Get("console").Call("group", fmt.Sprintf("🌐 Evento de red: %s", eventType))
+	js.Global().Get("console").Call("log", " Peer ID:", peerID.String())
+	js.Global().Get("console").Call("log", "🔹 Dirección:", addr.String())
+	js.Global().Get("console").Call("log", "🔹 Timestamp:", time.Now().Format(time.RFC3339))
+	js.Global().Get("console").Call("groupEnd")
 } 

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"path/filepath"
 	"strings"
 	"syscall/js"
@@ -11,21 +12,35 @@ var (
 	callbacks []js.Func
 )
 
+func logMain(category string, message string, args ...interface{}) {
+	console := js.Global().Get("console")
+	fullMessage := fmt.Sprintf(message, args...)
+	
+	switch category {
+	case "error":
+		console.Call("error", "❌ [Main]", fullMessage)
+	case "warn":
+		console.Call("warn", "⚠️ [Main]", fullMessage)
+	default:
+		console.Call("log", "🎮 [Main]", fullMessage)
+	}
+}
+
 func updateGamePath(this js.Value, args []js.Value) interface{} {
 	if len(args) == 0 {
-		js.Global().Get("console").Call("error", "Error: No se recibió ninguna ruta")
+		logMain("error", "No se recibió ninguna ruta")
 		return nil
 	}
 
 	gamePath = args[0].String()
-	js.Global().Get("console").Call("log", "Ruta recibida:", gamePath)
+	logMain("info", "Ruta recibida: %s", gamePath)
 
 	if !isValidExecutable(gamePath) {
-		js.Global().Get("console").Call("error", "Error: El archivo no es un ejecutable válido")
+		logMain("error", "El archivo no es un ejecutable válido")
 		return nil
 	}
 	
-	js.Global().Get("console").Call("log", "Archivo válido, habilitando botón")
+	logMain("info", "Archivo válido, habilitando botón")
 	js.Global().Get("document").Call("getElementById", "launchButton").Set("disabled", false)
 	return nil
 }
@@ -37,20 +52,20 @@ func isValidExecutable(path string) bool {
 
 func launchGame() {
 	if gamePath == "" {
-		js.Global().Get("console").Call("error", "Error: No se ha seleccionado la ruta del juego")
+		logMain("error", "No se ha seleccionado la ruta del juego")
 		return
 	}
 
-	js.Global().Get("console").Call("log", "Intentando iniciar el juego en:", gamePath)
+	logMain("info", "Intentando iniciar el juego en: %s", gamePath)
 
 	// Usar el API de Electron para iniciar el sandbox
 	promise := js.Global().Get("electron").Call("launchInSandbox", gamePath)
 	
 	promise.Call("then", js.FuncOf(func(this js.Value, args []js.Value) interface{} {
 		if args[0].Bool() {
-			js.Global().Get("console").Call("log", "Juego iniciado correctamente en Windows Sandbox")
+			logMain("info", "Juego iniciado correctamente en Windows Sandbox")
 		} else {
-			js.Global().Get("console").Call("error", "Error al iniciar el sandbox")
+			logMain("error", "Error al iniciar el sandbox")
 		}
 		return nil
 	}))
@@ -89,28 +104,27 @@ func registerCallbacks() {
 }
 
 func main() {
-	// Crear un canal que nunca se cerrará
+	logMain("info", "Iniciando aplicación...")
+	
 	c := make(chan struct{})
 	
-	// Registrar todas las funciones de callback
+	logMain("info", "Registrando callbacks...")
 	registerCallbacks()
 	
-	// Inicializar P2P
 	if err := initP2P(); err != nil {
-		js.Global().Get("console").Call("error", "Error iniciando P2P:", err.Error())
+		logMain("error", "Error iniciando P2P: %v", err)
 	} else {
-		js.Global().Get("console").Call("log", "P2P inicializado correctamente")
+		logMain("info", "P2P inicializado correctamente")
 	}
 	
-	js.Global().Get("console").Call("log", "WASM inicializado correctamente")
+	logMain("info", "WASM inicializado correctamente")
 
-	// Asegurarnos de limpiar los callbacks cuando el programa termine
 	defer func() {
+		logMain("info", "Limpiando callbacks...")
 		for _, cb := range callbacks {
 			cb.Release()
 		}
 	}()
 	
-	// Esperar indefinidamente
 	<-c
 } 

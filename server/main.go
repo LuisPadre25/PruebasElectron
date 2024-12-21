@@ -31,6 +31,7 @@ type Hub struct {
 	broadcast  chan []byte
 	register   chan *Client
 	unregister chan *Client
+	handleClient func(*Client)
 }
 
 func newHub() *Hub {
@@ -39,6 +40,31 @@ func newHub() *Hub {
 		register:   make(chan *Client),
 		unregister: make(chan *Client),
 		clients:    make(map[*Client]bool),
+		handleClient: func(client *Client) {
+			logServer("info", "👤 Cliente conectado desde %s. Total conectados: %d", 
+				client.conn.RemoteAddr(), len(client.hub.clients))
+			
+			defer func() {
+				client.hub.unregister <- client
+				client.conn.Close()
+				logServer("info", "👋 Cliente desconectado desde %s. Total conectados: %d", 
+					client.conn.RemoteAddr(), len(client.hub.clients)-1)
+			}()
+
+			for {
+				_, message, err := client.conn.ReadMessage()
+				if err != nil {
+					if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
+						logServer("error", "Error leyendo mensaje de %s: %v", 
+							client.conn.RemoteAddr(), err)
+					}
+					break
+				}
+				logServer("info", "📨 Mensaje recibido de %s [%d bytes]: %s", 
+					client.conn.RemoteAddr(), len(message), string(message))
+				client.hub.broadcast <- message
+			}
+		},
 	}
 }
 
@@ -47,20 +73,28 @@ func (h *Hub) run() {
 		select {
 		case client := <-h.register:
 			h.clients[client] = true
-			log.Printf("Nuevo cliente conectado. Total: %d", len(h.clients))
+			logServer("info", "📥 Nuevo cliente registrado desde %s. Total: %d", 
+				client.conn.RemoteAddr(), len(h.clients))
 		case client := <-h.unregister:
 			if _, ok := h.clients[client]; ok {
 				delete(h.clients, client)
+				
 				close(client.send)
-				log.Printf("Cliente desconectado. Total: %d", len(h.clients))
+				logServer("info", "📤 Cliente desregistrado desde %s. Total: %d", 
+					client.conn.RemoteAddr(), len(h.clients))
 			}
 		case message := <-h.broadcast:
+			logServer("info", "📢 Difundiendo mensaje a %d clientes", len(h.clients))
 			for client := range h.clients {
 				select {
 				case client.send <- message:
+					logServer("info", "✅ Mensaje enviado a cliente %s", 
+						client.conn.RemoteAddr())
 				default:
 					close(client.send)
 					delete(h.clients, client)
+					logServer("error", "❌ Error enviando mensaje a %s, cliente eliminado", 
+						client.conn.RemoteAddr())
 				}
 			}
 		}
@@ -77,7 +111,7 @@ func (c *Client) readPump() {
 		_, message, err := c.conn.ReadMessage()
 		if err != nil {
 			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
-				log.Printf("error: %v", err)
+				log.Printf("❌ Error leyendo mensaje: %v", err)
 			}
 			break
 		}
@@ -105,16 +139,21 @@ func (c *Client) writePump() {
 }
 
 func serveWs(hub *Hub, w http.ResponseWriter, r *http.Request) {
+	logServer("info", "Nueva solicitud WebSocket desde %s", r.RemoteAddr)
+	
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
-		log.Println(err)
+		logServer("error", "Error actualizando conexión: %v", err)
 		return
 	}
+	
 	client := &Client{hub: hub, conn: conn, send: make(chan []byte, 256)}
 	client.hub.register <- client
 
+	logServer("info", "WebSocket establecido con %s", r.RemoteAddr)
+
 	go client.writePump()
-	go client.readPump()
+	go hub.handleClient(client)
 }
 
 type ServerInfo struct {
@@ -123,6 +162,8 @@ type ServerInfo struct {
 }
 
 func getServerInfo(w http.ResponseWriter, r *http.Request, port int) {
+	logServer("info", "Solicitud de información del servidor desde %s", r.RemoteAddr)
+	
 	// Configurar CORS
 	w.Header().Set("Access-Control-Allow-Origin", "*")
 	w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
@@ -156,6 +197,7 @@ func getServerInfo(w http.ResponseWriter, r *http.Request, port int) {
 		Port: port,
 	}
 
+	logServer("info", "Enviando información del servidor: IP=%s, Puerto=%d", ip, port)
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(info)
 }
@@ -176,6 +218,19 @@ func findServerPort() int {
 	return 8080 // Puerto por defecto si no se encuentra uno disponible
 }
 
+func logServer(category string, message string, args ...interface{}) {
+	fullMessage := fmt.Sprintf(message, args...)
+	
+	switch category {
+	case "error":
+		log.Printf("❌ [Server] %s", fullMessage)
+	case "warn":
+		log.Printf("⚠️ [Server] %s", fullMessage)
+	default:
+		log.Printf("🌐 [Server] %s", fullMessage)
+	}
+}
+
 func main() {
 	// Encontrar un puerto disponible
 	defaultPort := findServerPort()
@@ -187,14 +242,19 @@ func main() {
 	hub := newHub()
 	go hub.run()
 
-	// Configurar las rutas
+	// Configurar el logger
+	log.SetFlags(log.Ltime | log.Ldate)
+	log.Printf("🚀 Iniciando servidor Warcraft LAN...")
+	log.Printf("📡 Configurando endpoints...")
+
+	// Configurar las rutas con logging
 	http.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
-		log.Printf("Nueva conexión WebSocket desde: %s", r.RemoteAddr)
+		log.Printf("📥 Nueva conexión WebSocket desde: %s", r.RemoteAddr)
 		serveWs(hub, w, r)
 	})
 
 	http.HandleFunc("/server-info", func(w http.ResponseWriter, r *http.Request) {
-		log.Printf("Solicitud de información del servidor desde: %s", r.RemoteAddr)
+		log.Printf("ℹ️ Solicitud de información del servidor desde: %s", r.RemoteAddr)
 		getServerInfo(w, r, *port)
 	})
 
@@ -204,18 +264,25 @@ func main() {
 
 	// Construir la dirección completa
 	address := fmt.Sprintf(":%d", *port)
-	log.Printf("Iniciando servidor en %s...", address)
-
+	
 	// Verificar que el puerto esté disponible
 	listener, err := net.Listen("tcp", address)
 	if err != nil {
-		log.Fatalf("Error verificando puerto: %v", err)
+		log.Fatalf("❌ Error verificando puerto: %v", err)
 	}
 	listener.Close()
 
-	log.Printf("Servidor listo en http://localhost%s", address)
+	// Banner de inicio
+	log.Printf(`
+🎮 Servidor Warcraft LAN
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+📍 Puerto: %d
+🌐 URL: http://localhost%s
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`, *port, address)
+
+	log.Printf("✅ Servidor listo y escuchando")
 	err = http.ListenAndServe(address, nil)
 	if err != nil {
-		log.Fatal("Error iniciando servidor:", err)
+		log.Fatalf("❌ Error fatal: %v", err)
 	}
 } 
