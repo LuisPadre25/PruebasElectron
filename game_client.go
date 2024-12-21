@@ -275,31 +275,178 @@ func (c *GameClient) connectTCP() error {
 }
 
 func (c *GameClient) discoverServer() (string, error) {
-    // Crear socket UDP para broadcast
-    conn, err := net.DialUDP("udp", nil, &net.UDPAddr{
-        IP:   net.IPv4(255, 255, 255, 255),
-        Port: 5001,
-    })
+    // Lista de métodos de descubrimiento
+    methods := []func() (string, error){
+        c.discoverByBroadcast,
+        c.discoverByLocalScan,
+        c.discoverByCommonIPs,
+    }
+
+    // Intentar cada método
+    var lastError error
+    for _, method := range methods {
+        serverAddr, err := method()
+        if err == nil {
+            return serverAddr, nil
+        }
+        lastError = err
+        fmt.Printf("Método de descubrimiento falló: %v\n", err)
+    }
+
+    return "", fmt.Errorf("no se pudo encontrar el servidor: %v", lastError)
+}
+
+func (c *GameClient) discoverByBroadcast() (string, error) {
+    fmt.Println("Intentando descubrir por broadcast...")
+    
+    // Crear socket UDP
+    addr, err := net.ResolveUDPAddr("udp4", ":0")
+    if err != nil {
+        return "", err
+    }
+    
+    conn, err := net.ListenUDP("udp4", addr)
     if err != nil {
         return "", err
     }
     defer conn.Close()
 
-    // Enviar mensaje de descubrimiento
-    fmt.Println("Buscando servidor...")
-    conn.Write([]byte("DISCOVER_GAME_SERVER"))
+    // Habilitar broadcast
+    conn.SetWriteBuffer(1024)
+    
+    // Enviar broadcast a todas las interfaces de red
+    interfaces, err := net.Interfaces()
+    if err != nil {
+        return "", err
+    }
+
+    message := []byte("DISCOVER_GAME_SERVER")
+    for _, iface := range interfaces {
+        addrs, err := iface.Addrs()
+        if err != nil {
+            continue
+        }
+
+        for _, addr := range addrs {
+            if ipnet, ok := addr.(*net.IPNet); ok {
+                if ipv4 := ipnet.IP.To4(); ipv4 != nil {
+                    // Obtener dirección de broadcast para esta red
+                    broadcast := getBroadcastAddress(ipnet)
+                    broadcastAddr := &net.UDPAddr{
+                        IP:   broadcast,
+                        Port: 5001,
+                    }
+                    
+                    // Enviar mensaje de descubrimiento
+                    conn.WriteToUDP(message, broadcastAddr)
+                }
+            }
+        }
+    }
 
     // Esperar respuesta
     buffer := make([]byte, 1024)
-    conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+    conn.SetReadDeadline(time.Now().Add(2 * time.Second))
     n, _, err := conn.ReadFromUDP(buffer)
     if err != nil {
-        return "", fmt.Errorf("no se encontró servidor: %v", err)
+        return "", err
     }
 
-    serverAddr := string(buffer[:n])
-    fmt.Printf("Servidor encontrado en %s\n", serverAddr)
-    return serverAddr, nil
+    return string(buffer[:n]), nil
+}
+
+func getBroadcastAddress(n *net.IPNet) net.IP {
+    if len(n.IP) == 4 {
+        mask := n.Mask
+        broadcast := make(net.IP, 4)
+        for i := range broadcast {
+            broadcast[i] = n.IP[i] | ^mask[i]
+        }
+        return broadcast
+    }
+    return nil
+}
+
+func (c *GameClient) discoverByLocalScan() (string, error) {
+    fmt.Println("Escaneando red local...")
+    
+    // Obtener IP local
+    localIP := c.getLocalIPPrefix()
+    if localIP == "" {
+        return "", fmt.Errorf("no se pudo obtener IP local")
+    }
+
+    // Escanear IPs en la red local
+    for i := 1; i < 255; i++ {
+        targetIP := fmt.Sprintf("%s%d", localIP, i)
+        if c.tryServerConnection(targetIP) {
+            return fmt.Sprintf("%s:5000", targetIP), nil
+        }
+    }
+
+    return "", fmt.Errorf("no se encontró servidor en la red local")
+}
+
+func (c *GameClient) getLocalIPPrefix() string {
+    addrs, err := net.InterfaceAddrs()
+    if err != nil {
+        return ""
+    }
+
+    for _, addr := range addrs {
+        if ipnet, ok := addr.(*net.IPNet); ok && !ipnet.IP.IsLoopback() {
+            if ipv4 := ipnet.IP.To4(); ipv4 != nil {
+                // Devolver los primeros 3 octetos de la IP
+                parts := strings.Split(ipv4.String(), ".")
+                if len(parts) == 4 {
+                    return fmt.Sprintf("%s.%s.%s.", parts[0], parts[1], parts[2])
+                }
+            }
+        }
+    }
+    return ""
+}
+
+func (c *GameClient) discoverByCommonIPs() (string, error) {
+    fmt.Println("Probando IPs comunes...")
+    
+    // Obtener el prefijo de la red local
+    localPrefix := c.getLocalIPPrefix()
+    
+    commonIPs := []string{
+        "127.0.0.1",          // localhost
+        "192.168.1.1",        // Router común
+        "192.168.0.1",        // Router común
+        "192.168.68.109",     // Tu IP actual
+    }
+
+    // Agregar IPs de la red local
+    if localPrefix != "" {
+        for i := 1; i < 10; i++ {
+            commonIPs = append(commonIPs, fmt.Sprintf("%s%d", localPrefix, i))
+        }
+    }
+
+    for _, ip := range commonIPs {
+        fmt.Printf("Probando %s...\n", ip)
+        if c.tryServerConnection(ip) {
+            return fmt.Sprintf("%s:5000", ip), nil
+        }
+    }
+
+    return "", fmt.Errorf("no se encontró servidor en IPs comunes")
+}
+
+func (c *GameClient) tryServerConnection(ip string) bool {
+    addr := fmt.Sprintf("%s:5000", ip)
+    conn, err := net.DialTimeout("tcp", addr, time.Second)
+    if err != nil {
+        fmt.Printf("No se pudo conectar a %s: %v\n", addr, err)
+        return false
+    }
+    conn.Close()
+    fmt.Printf("¡Servidor encontrado en %s!\n", addr)
+    return true
 }
 
 // Función principal para usar el cliente
@@ -317,13 +464,29 @@ func main() {
 
     fmt.Printf("Usando puertos - UDP: %d, TCP: %d\n", udpPort, tcpPort)
 
-    // Descubrir servidor automáticamente
-    serverAddr, err := client.discoverServer()
-    if err != nil {
-        fmt.Printf("Error descubriendo servidor: %v\n", err)
-        fmt.Println("\nPresiona Enter para salir...")
-        fmt.Scanln()
-        return
+    // Permitir especificar IP manualmente
+    fmt.Print("Presione Enter para buscar automáticamente o ingrese la IP del servidor: ")
+    var input string
+    fmt.Scanln(&input)
+
+    var serverAddr string
+    var err error
+
+    if input != "" {
+        // Usar IP ingresada
+        if !strings.Contains(input, ":") {
+            input = input + ":5000"
+        }
+        serverAddr = input
+    } else {
+        // Descubrir automáticamente
+        serverAddr, err = client.discoverServer()
+        if err != nil {
+            fmt.Printf("Error descubriendo servidor: %v\n", err)
+            fmt.Println("\nPresiona Enter para salir...")
+            fmt.Scanln()
+            return
+        }
     }
 
     // Conectar al servidor descubierto
