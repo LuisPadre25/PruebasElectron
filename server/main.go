@@ -7,6 +7,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"os"
 	
 
 	"github.com/gorilla/websocket"
@@ -232,15 +233,39 @@ func logServer(category string, message string, args ...interface{}) {
 }
 
 func main() {
-	// Encontrar un puerto disponible
 	defaultPort := findServerPort()
-	
-	// Usar directamente flag.Int en lugar de una variable global
 	port := flag.Int("port", defaultPort, "Puerto del servidor")
 	flag.Parse()
 
+	// Verificar que el puerto está disponible antes de iniciar
+	addr := fmt.Sprintf(":%d", *port)
+	l, err := net.Listen("tcp", addr)
+	if err != nil {
+		logServer("error", "Puerto %d no está disponible: %v", *port, err)
+		os.Exit(1)
+	}
+	l.Close()
+
 	hub := newHub()
 	go hub.run()
+
+	// Configurar el logger
+	log.SetFlags(log.Ltime | log.Ldate)
+	logServer("info", "Iniciando servidor en puerto %d", *port)
+	logServer("info", "Interfaces de red disponibles:")
+
+	// Listar todas las interfaces de red
+	interfaces, err := net.Interfaces()
+	if err == nil {
+		for _, iface := range interfaces {
+			addrs, err := iface.Addrs()
+			if err == nil {
+				for _, addr := range addrs {
+					logServer("info", "  • %s: %s", iface.Name, addr.String())
+				}
+			}
+		}
+	}
 
 	// Configurar el logger
 	log.SetFlags(log.Ltime | log.Ldate)
@@ -266,11 +291,11 @@ func main() {
 	address := fmt.Sprintf(":%d", *port)
 	
 	// Verificar que el puerto esté disponible
-	listener, err := net.Listen("tcp", address)
+	l, err = net.Listen("tcp", address)
 	if err != nil {
 		log.Fatalf("❌ Error verificando puerto: %v", err)
 	}
-	listener.Close()
+	l.Close()
 
 	// Banner de inicio
 	log.Printf(`

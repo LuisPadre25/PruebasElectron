@@ -225,12 +225,25 @@ func initP2P() error {
 
 	logP2P("info", "Puertos asignados - WS: %d, TCP: %d", wsPort, tcpPort)
 
+	// Verificar que los puertos estén realmente disponibles
+	for _, port := range []int{wsPort, tcpPort} {
+		if err := checkPortAvailable(localIP, port); err != nil {
+			logP2P("error", "Puerto %d no está disponible: %v", port, err)
+			return fmt.Errorf("puerto %d no está disponible: %v", port, err)
+		}
+	}
+
 	// Lista de direcciones para escuchar
 	listenAddrs := []string{
 		fmt.Sprintf("/ip4/0.0.0.0/tcp/%d", tcpPort),
 		fmt.Sprintf("/ip4/0.0.0.0/tcp/%d/ws", wsPort),
 		fmt.Sprintf("/ip4/%s/tcp/%d", localIP, tcpPort),
 		fmt.Sprintf("/ip4/%s/tcp/%d/ws", localIP, wsPort),
+	}
+
+	logP2P("info", "Configurando direcciones de escucha:")
+	for _, addr := range listenAddrs {
+		logP2P("info", "  • %s", addr)
 	}
 
 	// Configuración simplificada del nodo P2P
@@ -341,13 +354,33 @@ func connectToPeer() js.Func {
 		}
 
 		peerAddr := args[0].String()
-		logP2P("info", "Iniciando conexión a peer: %s", peerAddr)
+		logP2P("info", "Analizando dirección del peer: %s", peerAddr)
 
 		ma, err := multiaddr.NewMultiaddr(peerAddr)
 		if err != nil {
 			logP2P("error", "Error en la dirección: %v", err)
 			return fmt.Sprintf("Error en la dirección del peer: %v", err)
 		}
+
+		ip, err := ma.ValueForProtocol(multiaddr.P_IP4)
+		if err != nil {
+			logP2P("error", "No se pudo extraer IP de la dirección: %v", err)
+			return "Dirección IP no válida"
+		}
+
+		port, err := ma.ValueForProtocol(multiaddr.P_TCP)
+		if err != nil {
+			logP2P("error", "No se pudo extraer puerto de la dirección: %v", err)
+			return "Puerto no válido"
+		}
+
+		logP2P("info", "Verificando conectividad básica con %s:%s", ip, port)
+		conn, err := net.DialTimeout("tcp", fmt.Sprintf("%s:%s", ip, port), 5*time.Second)
+		if err != nil {
+			logP2P("error", "No se puede establecer conexión TCP básica: %v", err)
+			return fmt.Sprintf("No se puede conectar al peer: %v", err)
+		}
+		conn.Close()
 
 		peerinfo, err := peer.AddrInfoFromP2pAddr(ma)
 		if err != nil {
@@ -441,4 +474,24 @@ func logNetworkEvent(eventType string, peerID peer.ID, addr multiaddr.Multiaddr)
 	js.Global().Get("console").Call("log", "🔹 Dirección:", addr.String())
 	js.Global().Get("console").Call("log", "🔹 Timestamp:", time.Now().Format(time.RFC3339))
 	js.Global().Get("console").Call("groupEnd")
+}
+
+// Agregar nueva función para verificar puerto
+func checkPortAvailable(ip string, port int) error {
+	// Intentar escuchar en el puerto específico
+	addr := fmt.Sprintf("%s:%d", ip, port)
+	listener, err := net.Listen("tcp", addr)
+	if err != nil {
+		return err
+	}
+	defer listener.Close()
+
+	// Verificar que podemos conectarnos al puerto
+	conn, err := net.Dial("tcp", addr)
+	if err != nil {
+		return fmt.Errorf("no se puede conectar al puerto: %v", err)
+	}
+	conn.Close()
+
+	return nil
 } 
