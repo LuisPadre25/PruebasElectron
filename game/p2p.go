@@ -225,12 +225,20 @@ func initP2P() error {
 	wsPort := 9100  // Puerto WebSocket fijo
 	tcpPort := 9101 // Puerto TCP fijo
 
-	if wsPort == -1 || tcpPort == -1 {
-		logP2P("error", "No se encontraron puertos disponibles")
-		return fmt.Errorf("no se encontraron puertos disponibles")
-	}
+	logP2P("info", "Intentando configurar puertos - WS: %d, TCP: %d", wsPort, tcpPort)
 
-	logP2P("info", "Puertos asignados - WS: %d, TCP: %d", wsPort, tcpPort)
+	// Verificar que los puertos estén realmente disponibles antes de continuar
+	for _, port := range []int{wsPort, tcpPort} {
+			addr := fmt.Sprintf("%s:%d", localIP, port)
+			logP2P("info", "Verificando disponibilidad del puerto %d en %s", port, addr)
+			l, err := net.Listen("tcp", addr)
+			if err != nil {
+				logP2P("error", "Puerto %d no disponible: %v", port, err)
+				return fmt.Errorf("puerto %d no disponible", port)
+			}
+			logP2P("info", "Puerto %d disponible", port)
+			l.Close()
+	}
 
 	// Lista de direcciones para escuchar
 	listenAddrs := []string{
@@ -243,32 +251,29 @@ func initP2P() error {
 		logP2P("info", "  • %s", addr)
 	}
 
-	// Verificar que los puertos estén realmente disponibles antes de continuar
-	for _, port := range []int{wsPort, tcpPort} {
-		addr := fmt.Sprintf("%s:%d", localIP, port)
-		l, err := net.Listen("tcp", addr)
-		if err != nil {
-			logP2P("error", "Puerto %d no disponible: %v", port, err)
-			return fmt.Errorf("puerto %d no disponible", port)
-		}
-		l.Close()
-	}
+	logP2P("info", "Creando nodo P2P con configuración:")
+	logP2P("info", "  • Transporte: WebSocket")
+	logP2P("info", "  • NAT: Habilitado")
+	logP2P("info", "  • Hole Punching: Habilitado")
+	logP2P("info", "  • Relay: Deshabilitado")
 
 	// Configuración del nodo P2P
 	node, err = libp2p.New(
 		libp2p.ListenAddrStrings(listenAddrs...),
-		libp2p.DefaultSecurity,
-		libp2p.DefaultMuxers,
-		libp2p.Transport(websocket.New),
-		libp2p.DisableRelay(),
-		libp2p.EnableNATService(),
-		libp2p.NATPortMap(),
-		libp2p.EnableHolePunching(),
+			libp2p.DefaultSecurity,
+			libp2p.DefaultMuxers,
+			libp2p.Transport(websocket.New),
+			libp2p.DisableRelay(),
+			libp2p.EnableNATService(),
+			libp2p.NATPortMap(),
+			libp2p.EnableHolePunching(),
 	)
 	if err != nil {
 		logP2P("error", "Error creando nodo P2P: %v", err)
 		return fmt.Errorf("error creando nodo p2p: %v", err)
 	}
+
+	logP2P("info", "Nodo P2P creado con ID: %s", node.ID().String())
 
 	// Verificar que el nodo está escuchando en las direcciones correctas
 	actualAddrs := node.Addrs()
@@ -277,8 +282,11 @@ func initP2P() error {
 		logP2P("info", "  • %s", addr.String())
 	}
 
+	logP2P("info", "Configurando manejador de streams para protocolo /warcraft/lan/1.0.0")
 	node.SetStreamHandler("/warcraft/lan/1.0.0", handleStream)
+
 	logP2P("info", "Nodo P2P inicializado correctamente")
+	logP2P("info", "Esperando conexiones entrantes...")
 	return nil
 }
 
@@ -383,12 +391,17 @@ func connectToPeer() js.Func {
 		}
 
 		logP2P("info", "Verificando conectividad básica con %s:%s", ip, port)
-		conn, err := net.DialTimeout("tcp", fmt.Sprintf("%s:%s", ip, port), 5*time.Second)
+		tcpAddr := fmt.Sprintf("%s:%s", ip, port)
+		logP2P("info", "Intentando conexión TCP a %s", tcpAddr)
+		conn, err := net.DialTimeout("tcp", tcpAddr, 5*time.Second)
 		if err != nil {
-			logP2P("error", "No se puede establecer conexión TCP básica: %v", err)
-			return fmt.Sprintf("No se puede conectar al peer: %v", err)
+			logP2P("warn", "Conexión TCP fallida: %v", err)
+			wsAddr := fmt.Sprintf("%s:%s/ws", ip, port)
+			logP2P("info", "Intentando conexión WebSocket a %s", wsAddr)
+		} else {
+			conn.Close()
+			logP2P("info", "Conexión TCP exitosa")
 		}
-		conn.Close()
 
 		peerinfo, err := peer.AddrInfoFromP2pAddr(ma)
 		if err != nil {
