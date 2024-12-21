@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"net"
-	"strings"
 	"syscall/js"
 	"time"
 
@@ -193,62 +192,42 @@ func initP2P() error {
 	localIP := getServerIP()
 	js.Global().Get("console").Call("log", "IP del servidor:", localIP)
 
-	// Buscar puertos disponibles en rangos menos comunes
-	// Evitamos puertos comunes como 80, 443, 3000-3999, 8000-8999
-	wsPort := findAvailablePort(9100, 9200)  // Rango para WebSocket
-	tcpPort := findAvailablePort(9201, 9300) // Rango para TCP
+	// Buscar puertos disponibles
+	wsPort := findAvailablePort(9100, 9200)
+	tcpPort := findAvailablePort(9201, 9300)
 
 	if wsPort == -1 || tcpPort == -1 {
 		return fmt.Errorf("no se encontraron puertos disponibles")
 	}
 
-	js.Global().Get("console").Call("log", "Usando puertos - WS:", wsPort, "TCP:", tcpPort)
-
 	// Lista de direcciones para escuchar
 	listenAddrs := []string{
-		// Escuchar en todas las interfaces
 		fmt.Sprintf("/ip4/0.0.0.0/tcp/%d", tcpPort),
 		fmt.Sprintf("/ip4/0.0.0.0/tcp/%d/ws", wsPort),
-		// También escuchar específicamente en la IP local
 		fmt.Sprintf("/ip4/%s/tcp/%d", localIP, tcpPort),
 		fmt.Sprintf("/ip4/%s/tcp/%d/ws", localIP, wsPort),
 	}
 
-	// Crear un nuevo nodo P2P con configuración específica
+	// Configuración mejorada del nodo P2P
 	node, err = libp2p.New(
-		// Escuchar en las direcciones configuradas
 		libp2p.ListenAddrStrings(listenAddrs...),
-		// Configuración de seguridad
 		libp2p.DefaultSecurity,
-		// Configuración de multiplexing
 		libp2p.DefaultMuxers,
-		// Transportes
 		libp2p.Transport(websocket.New),
-		// Habilitar discovery
 		libp2p.EnableRelay(),
-		// Habilitar NAT traversal
 		libp2p.EnableNATService(),
 		libp2p.NATPortMap(),
+		libp2p.EnableAutoRelay(),
+		libp2p.EnableHolePunching(),
 	)
 	if err != nil {
 		return fmt.Errorf("error creando nodo p2p: %v", err)
 	}
 
-	// Imprimir información del nodo para depuración
-	multiaddrs := node.Addrs()
-	addrStrings := make([]string, 0, len(multiaddrs))
-	for _, addr := range multiaddrs {
-		addrStrings = append(addrStrings, addr.String())
-		// Crear una dirección multiaddr completa para cada endpoint
-		fullAddr := fmt.Sprintf("%s/p2p/%s", addr.String(), node.ID().String())
-		js.Global().Get("console").Call("log", "Dirección completa:", fullAddr)
-	}
+	// Imprimir información detallada del nodo
+	printNodeInfo()
 
-	js.Global().Get("console").Call("log", "IP Local:", localIP)
-	js.Global().Get("console").Call("log", "Direcciones del nodo:", strings.Join(addrStrings, ", "))
-	js.Global().Get("console").Call("log", "ID del nodo:", node.ID().String())
-
-	// Manejar mensajes entrantes
+	// Configurar el manejador de streams
 	node.SetStreamHandler("/warcraft/1.0.0", handleStream)
 
 	return nil
@@ -326,14 +305,20 @@ func connectToPeer() js.Func {
 		}
 
 		peerAddr := args[0].String()
+		js.Global().Get("console").Call("log", "Intentando conectar a:", peerAddr)
+
 		ma, err := multiaddr.NewMultiaddr(peerAddr)
 		if err != nil {
-			return fmt.Sprintf("Error en la dirección del peer: %v", err)
+			errMsg := fmt.Sprintf("Error en la dirección del peer: %v", err)
+			js.Global().Get("console").Call("error", errMsg)
+			return errMsg
 		}
 
 		peerinfo, err := peer.AddrInfoFromP2pAddr(ma)
 		if err != nil {
-			return fmt.Sprintf("Error obteniendo info del peer: %v", err)
+			errMsg := fmt.Sprintf("Error obteniendo info del peer: %v", err)
+			js.Global().Get("console").Call("error", errMsg)
+			return errMsg
 		}
 
 		// Verificar que no estemos intentando conectarnos a nosotros mismos
@@ -341,18 +326,47 @@ func connectToPeer() js.Func {
 			return "Error: No puedes conectarte a tu propia dirección"
 		}
 
-		// Verificar si ya estamos conectados
-		for _, p := range node.Network().Peers() {
-			if p == peerinfo.ID {
-				return "Ya estás conectado a este peer"
+		// Crear un contexto con timeout más largo
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer cancel()
+
+		// Mejorar el sistema de retry con backoff exponencial
+		maxRetries := 5
+		baseDelay := time.Second
+		for i := 0; i < maxRetries; i++ {
+			// Calcular delay exponencial
+			delay := baseDelay * time.Duration(1<<uint(i))
+			
+			js.Global().Get("console").Call("log", 
+				fmt.Sprintf("Intento de conexión %d/%d", i+1, maxRetries))
+
+			// Intentar la conexión
+			err := node.Connect(ctx, *peerinfo)
+			if err == nil {
+				// Verificar si la conexión está realmente establecida
+				if node.Network().Connectedness(peerinfo.ID) == network.Connected {
+					js.Global().Get("console").Call("log", 
+						"Conexión establecida exitosamente con:", peerinfo.ID.String())
+					return "Conectado exitosamente"
+				}
+			}
+
+			// Loguear el error específico
+			js.Global().Get("console").Call("warn", 
+				fmt.Sprintf("Intento %d fallido: %v", i+1, err))
+
+			// Si no es el último intento, esperar antes del siguiente
+			if i < maxRetries-1 {
+				js.Global().Get("console").Call("log", 
+					fmt.Sprintf("Esperando %v antes del siguiente intento...", delay))
+				time.Sleep(delay)
 			}
 		}
 
-		if err := node.Connect(ctx, *peerinfo); err != nil {
-			return fmt.Sprintf("Error conectando al peer: %v", err)
-		}
-
-		return "Conectado exitosamente"
+		errMsg := "Error: No se pudo establecer la conexión después de varios intentos. " +
+			"Verifica que la dirección sea correcta y que el peer esté en línea."
+		js.Global().Get("console").Call("error", errMsg)
+		return errMsg
 	})
 }
 
@@ -380,4 +394,20 @@ func broadcastGame() js.Func {
 
 		return nil
 	})
+}
+
+// Nueva función auxiliar para imprimir información del nodo
+func printNodeInfo() {
+	multiaddrs := node.Addrs()
+	for _, addr := range multiaddrs {
+		fullAddr := fmt.Sprintf("%s/p2p/%s", addr.String(), node.ID().String())
+		js.Global().Get("console").Call("log", "Dirección completa:", fullAddr)
+		
+		// Analizar componentes de la dirección
+		components := addr.Protocols()
+		for _, comp := range components {
+			js.Global().Get("console").Call("log", "Protocolo:", 
+				fmt.Sprintf("- %s (%d)", comp.Name, comp.Code))
+		}
+	}
 } 
