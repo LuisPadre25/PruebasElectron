@@ -11,6 +11,14 @@ import (
     "os/signal"
 )
 
+const DEBUG = true
+
+func debugPrint(format string, args ...interface{}) {
+    if DEBUG {
+        fmt.Printf("[DEBUG] "+format+"\n", args...)
+    }
+}
+
 // Servidor de matchmaking y señalización solamente
 type GameServer struct {
     // Para emparejar jugadores
@@ -59,11 +67,35 @@ func (s *GameServer) Start() error {
     // 1. Servidor STUN para ayudar a los clientes a descubrir su IP pública
     go s.startSTUNServer()
 
-    // 2. Servidor de matchmaking (TCP)
-    listener, err := net.Listen("tcp", ":5000")
-    if err != nil {
-        return err
+    // Mostrar y seleccionar interfaz
+    fmt.Println("\nInterfaces de red disponibles:")
+    ifaces, err := net.Interfaces()
+    if err == nil {
+        for i, iface := range ifaces {
+            addrs, err := iface.Addrs()
+            if err == nil {
+                for _, addr := range addrs {
+                    if ipnet, ok := addr.(*net.IPNet); ok {
+                        if ipnet.IP.To4() != nil {
+                            fmt.Printf("[%d] %v: %v\n", i, iface.Name, ipnet.IP.String())
+                        }
+                    }
+                }
+            }
+        }
     }
+
+    // Escuchar en la IP del módem/compartir internet
+    listener, err := net.Listen("tcp", "192.168.11.150:5000")  // IP de la interfaz que comparte internet
+    if err != nil {
+        // Si falla, intentar escuchar en todas las interfaces
+        listener, err = net.Listen("tcp", "0.0.0.0:5000")
+        if err != nil {
+            return err
+        }
+    }
+
+    fmt.Printf("\nServidor escuchando en %v\n", listener.Addr())
 
     fmt.Println("Servidor de juegos escuchando en :5000")
     fmt.Println("Este servidor SOLO maneja:")

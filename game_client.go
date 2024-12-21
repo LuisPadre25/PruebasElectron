@@ -329,32 +329,21 @@ func main() {
     fmt.Printf("Usando puertos - UDP: %d, TCP: %d\n", udpPort, tcpPort)
 
     // Permitir especificar IP manualmente
-    fmt.Print("Presione Enter para buscar automáticamente o ingrese la IP del servidor: ")
+    fmt.Print("Ingrese la IP del servidor (192.168.11.150): ")
     var input string
     fmt.Scanln(&input)
-
-    var serverAddr string
-    var err error
-
-    if input != "" {
-        // Usar IP ingresada
-        if !strings.Contains(input, ":") {
-            input = input + ":5000"
-        }
-        serverAddr = input
-    } else {
-        // Descubrir automáticamente
-        serverAddr, err = client.discoverServer()
-        if err != nil {
-            fmt.Printf("Error descubriendo servidor: %v\n", err)
-            fmt.Println("\nPresiona Enter para salir...")
-            fmt.Scanln()
-            return
-        }
+    if input == "" {
+        input = "192.168.11.150"
     }
 
-    // Conectar al servidor descubierto
-    err = client.Connect(serverAddr)
+    // Agregar el puerto si no está especificado
+    if !strings.Contains(input, ":") {
+        input = input + ":5000"
+    }
+
+    // Intentar conectar
+    fmt.Printf("Conectando a %s...\n", input)
+    err := client.Connect(input)
     if err != nil {
         fmt.Printf("Error conectando: %v\n", err)
         fmt.Println("\nPresiona Enter para salir...")
