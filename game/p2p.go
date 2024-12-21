@@ -193,8 +193,15 @@ func getServerIP() string {
 
 // Función para encontrar un puerto disponible en un rango
 func findAvailablePort(startPort, endPort int) int {
+	// Intentar primero con el puerto inicial
+	listener, err := net.Listen("tcp", fmt.Sprintf(":%d", startPort))
+	if err == nil {
+		listener.Close()
+		return startPort
+	}
+
+	// Si el puerto inicial no está disponible, buscar otro
 	for port := startPort; port <= endPort; port++ {
-		// Intentar escuchar en el puerto
 		listener, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
 		if err == nil {
 			listener.Close()
@@ -214,9 +221,9 @@ func initP2P() error {
 	localIP := getServerIP()
 	logP2P("info", "IP del servidor: %s", localIP)
 
-	// Buscar puertos disponibles
-	wsPort := findAvailablePort(9100, 9200)
-	tcpPort := findAvailablePort(9201, 9300)
+	// Usar puertos fijos para mejor predictibilidad
+	wsPort := 9100  // Puerto WebSocket fijo
+	tcpPort := 9101 // Puerto TCP fijo
 
 	if wsPort == -1 || tcpPort == -1 {
 		logP2P("error", "No se encontraron puertos disponibles")
@@ -225,18 +232,8 @@ func initP2P() error {
 
 	logP2P("info", "Puertos asignados - WS: %d, TCP: %d", wsPort, tcpPort)
 
-	// Verificar que los puertos estén realmente disponibles
-	for _, port := range []int{wsPort, tcpPort} {
-		if err := checkPortAvailable(localIP, port); err != nil {
-			logP2P("error", "Puerto %d no está disponible: %v", port, err)
-			return fmt.Errorf("puerto %d no está disponible: %v", port, err)
-		}
-	}
-
 	// Lista de direcciones para escuchar
 	listenAddrs := []string{
-		fmt.Sprintf("/ip4/0.0.0.0/tcp/%d", tcpPort),
-		fmt.Sprintf("/ip4/0.0.0.0/tcp/%d/ws", wsPort),
 		fmt.Sprintf("/ip4/%s/tcp/%d", localIP, tcpPort),
 		fmt.Sprintf("/ip4/%s/tcp/%d/ws", localIP, wsPort),
 	}
@@ -246,30 +243,41 @@ func initP2P() error {
 		logP2P("info", "  • %s", addr)
 	}
 
-	// Configuración simplificada del nodo P2P
+	// Verificar que los puertos estén realmente disponibles antes de continuar
+	for _, port := range []int{wsPort, tcpPort} {
+		addr := fmt.Sprintf("%s:%d", localIP, port)
+		l, err := net.Listen("tcp", addr)
+		if err != nil {
+			logP2P("error", "Puerto %d no disponible: %v", port, err)
+			return fmt.Errorf("puerto %d no disponible", port)
+		}
+		l.Close()
+	}
+
+	// Configuración del nodo P2P
 	node, err = libp2p.New(
 		libp2p.ListenAddrStrings(listenAddrs...),
 		libp2p.DefaultSecurity,
 		libp2p.DefaultMuxers,
 		libp2p.Transport(websocket.New),
+		libp2p.DisableRelay(),
 		libp2p.EnableNATService(),
 		libp2p.NATPortMap(),
 		libp2p.EnableHolePunching(),
 	)
 	if err != nil {
+		logP2P("error", "Error creando nodo P2P: %v", err)
 		return fmt.Errorf("error creando nodo p2p: %v", err)
 	}
 
-	// Imprimir información detallada para debugging
-	js.Global().Get("console").Call("log", "ID del nodo:", node.ID().String())
-	for _, addr := range node.Addrs() {
-		fullAddr := fmt.Sprintf("%s/p2p/%s", addr.String(), node.ID().String())
-		logP2P("info", "Dirección de escucha: %s", fullAddr)
+	// Verificar que el nodo está escuchando en las direcciones correctas
+	actualAddrs := node.Addrs()
+	logP2P("info", "Direcciones activas del nodo:")
+	for _, addr := range actualAddrs {
+		logP2P("info", "  • %s", addr.String())
 	}
 
-	// Configurar el manejador de streams
 	node.SetStreamHandler("/warcraft/lan/1.0.0", handleStream)
-
 	logP2P("info", "Nodo P2P inicializado correctamente")
 	return nil
 }
