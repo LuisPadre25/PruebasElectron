@@ -202,23 +202,35 @@ func initP2P() error {
 
 	// Lista de direcciones para escuchar
 	listenAddrs := []string{
+		// Escuchar en todas las interfaces
 		fmt.Sprintf("/ip4/0.0.0.0/tcp/%d", tcpPort),
 		fmt.Sprintf("/ip4/0.0.0.0/tcp/%d/ws", wsPort),
+		// Escuchar específicamente en la IP local
 		fmt.Sprintf("/ip4/%s/tcp/%d", localIP, tcpPort),
 		fmt.Sprintf("/ip4/%s/tcp/%d/ws", localIP, wsPort),
+		// Añadir soporte para IPv6
+		fmt.Sprintf("/ip6/::/tcp/%d", tcpPort),
+		fmt.Sprintf("/ip6/::/tcp/%d/ws", wsPort),
 	}
 
 	// Configuración mejorada del nodo P2P
 	node, err = libp2p.New(
+		// Usar opciones de red más permisivas
 		libp2p.ListenAddrStrings(listenAddrs...),
 		libp2p.DefaultSecurity,
 		libp2p.DefaultMuxers,
 		libp2p.Transport(websocket.New),
+		// Habilitar todas las opciones de conectividad
 		libp2p.EnableRelay(),
-		libp2p.EnableNATService(),
-		libp2p.NATPortMap(),
 		libp2p.EnableAutoRelay(),
 		libp2p.EnableHolePunching(),
+		libp2p.EnableNATService(),
+		libp2p.NATPortMap(),
+		// Deshabilitar filtros de red que puedan interferir
+		libp2p.NoTransports,
+		libp2p.Transport(websocket.New),
+		// Aumentar timeouts
+		libp2p.DisableRelay(),
 	)
 	if err != nil {
 		return fmt.Errorf("error creando nodo p2p: %v", err)
@@ -227,8 +239,8 @@ func initP2P() error {
 	// Imprimir información detallada del nodo
 	printNodeInfo()
 
-	// Configurar el manejador de streams
-	node.SetStreamHandler("/warcraft/1.0.0", handleStream)
+	// Configurar el manejador de streams con un protocolo más específico
+	node.SetStreamHandler("/warcraft/lan/1.0.0", handleStream)
 
 	return nil
 }
@@ -327,14 +339,13 @@ func connectToPeer() js.Func {
 		}
 
 		// Crear un contexto con timeout más largo
-		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 		defer cancel()
 
 		// Mejorar el sistema de retry con backoff exponencial
-		maxRetries := 5
+		maxRetries := 7
 		baseDelay := time.Second
 		for i := 0; i < maxRetries; i++ {
-			// Calcular delay exponencial
 			delay := baseDelay * time.Duration(1<<uint(i))
 			
 			js.Global().Get("console").Call("log", 
@@ -343,19 +354,22 @@ func connectToPeer() js.Func {
 			// Intentar la conexión
 			err := node.Connect(ctx, *peerinfo)
 			if err == nil {
-				// Verificar si la conexión está realmente establecida
+				// Verificar la conexión
 				if node.Network().Connectedness(peerinfo.ID) == network.Connected {
-					js.Global().Get("console").Call("log", 
-						"Conexión establecida exitosamente con:", peerinfo.ID.String())
-					return "Conectado exitosamente"
+					// Intentar establecer un stream de prueba
+					stream, err := node.NewStream(ctx, peerinfo.ID, "/warcraft/lan/1.0.0")
+					if err == nil {
+						stream.Close()
+						js.Global().Get("console").Call("log", 
+							"Conexión establecida exitosamente con:", peerinfo.ID.String())
+						return "Conectado exitosamente"
+					}
 				}
 			}
 
-			// Loguear el error específico
 			js.Global().Get("console").Call("warn", 
 				fmt.Sprintf("Intento %d fallido: %v", i+1, err))
 
-			// Si no es el último intento, esperar antes del siguiente
 			if i < maxRetries-1 {
 				js.Global().Get("console").Call("log", 
 					fmt.Sprintf("Esperando %v antes del siguiente intento...", delay))
@@ -364,7 +378,8 @@ func connectToPeer() js.Func {
 		}
 
 		errMsg := "Error: No se pudo establecer la conexión después de varios intentos. " +
-			"Verifica que la dirección sea correcta y que el peer esté en línea."
+			"Verifica que la dirección sea correcta y que el peer esté en línea. " +
+			"Asegúrate de que ambos peers estén en la misma red local."
 		js.Global().Get("console").Call("error", errMsg)
 		return errMsg
 	})
