@@ -152,43 +152,66 @@ func (c *GameClient) Connect(serverAddr string) error {
 
 // Intentar conexión P2P con el otro cliente
 func (c *GameClient) connectToPeer(ip, port string) error {
-    fmt.Printf("Intentando conexión P2P a %s:%s\n", ip, port)
+    fmt.Printf("Iniciando hole punching con %s:%s\n", ip, port)
     
-    conn, err := net.Dial("udp", fmt.Sprintf("%s:%s", ip, port))
+    // 1. Crear socket UDP local
+    localAddr := &net.UDPAddr{
+        IP:   net.ParseIP(c.localIP),
+        Port: c.udpPort,
+    }
+    conn, err := net.ListenUDP("udp", localAddr)
     if err != nil {
-        return fmt.Errorf("error P2P: %v", err)
+        return fmt.Errorf("error creando socket: %v", err)
     }
     c.peerConn = conn
 
-    // Enviar mensaje de prueba
-    fmt.Println("Enviando mensaje de prueba...")
-    if _, err := conn.Write([]byte("¡Hola! ¿Me escuchas?")); err != nil {
-        return fmt.Errorf("error enviando: %v", err)
-    }
-
-    // Esperar respuesta
-    buffer := make([]byte, 1024)
-    conn.SetReadDeadline(time.Now().Add(5 * time.Second))
-    n, err := conn.Read(buffer)
+    // 2. Dirección del peer
+    peerAddr, err := net.ResolveUDPAddr("udp", fmt.Sprintf("%s:%s", ip, port))
     if err != nil {
-        return fmt.Errorf("error recibiendo respuesta: %v", err)
+        return fmt.Errorf("error resolviendo peer: %v", err)
     }
 
-    fmt.Printf("Recibido del peer: %s\n", string(buffer[:n]))
-    fmt.Println("¡Conexión P2P verificada!")
-
-    // Iniciar goroutine para escuchar mensajes
+    // 3. Enviar paquetes de hole punching
+    fmt.Println("Enviando paquetes de hole punching...")
     go func() {
-        buffer := make([]byte, 1024)
-        for {
-            n, err := conn.Read(buffer)
-            if err != nil {
-                fmt.Printf("Error leyendo del peer: %v\n", err)
-                return
-            }
-            fmt.Printf("Mensaje del peer: %s\n", string(buffer[:n]))
+        for i := 0; i < 5; i++ {
+            conn.WriteToUDP([]byte("punch"), peerAddr)
+            time.Sleep(100 * time.Millisecond)
         }
     }()
+
+    // 4. Esperar respuesta
+    fmt.Println("Esperando respuesta del peer...")
+    buffer := make([]byte, 1024)
+    conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+
+    for {
+        n, remoteAddr, err := conn.ReadFromUDP(buffer)
+        if err != nil {
+            return fmt.Errorf("error recibiendo: %v", err)
+        }
+
+        fmt.Printf("Recibido de %v: %s\n", remoteAddr, string(buffer[:n]))
+
+        // 5. Enviar respuesta
+        conn.WriteToUDP([]byte("¡Te escucho!"), remoteAddr)
+        fmt.Println("¡Conexión P2P establecida!")
+
+        // 6. Iniciar goroutine para escuchar mensajes
+        go func() {
+            buffer := make([]byte, 1024)
+            for {
+                n, addr, err := conn.ReadFromUDP(buffer)
+                if err != nil {
+                    fmt.Printf("Error leyendo: %v\n", err)
+                    return
+                }
+                fmt.Printf("Mensaje de %v: %s\n", addr, string(buffer[:n]))
+            }
+        }()
+
+        break
+    }
 
     return nil
 }
