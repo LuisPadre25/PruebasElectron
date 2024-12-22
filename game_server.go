@@ -82,7 +82,7 @@ func (s *Server) startSTUN() error {
                         IP:   remoteAddr.IP,
                         Port: remoteAddr.Port,
                     },
-                    stun.NewTransactionIDSetter(tid), // Usar el mismo TransactionID
+                    stun.NewTransactionIDSetter(tid),
                 )
                 if err != nil {
                     fmt.Printf("Error STUN build: %v\n", err)
@@ -220,12 +220,10 @@ func (s *Server) addToWaitingList(player *Player) {
     s.mutex.Unlock()
 }
 
-// Agregar esta función al Server
 func (s *Server) removePlayer(playerID string) {
     s.mutex.Lock()
     defer s.mutex.Unlock()
 
-    // Eliminar de la lista de espera
     delete(s.waitingPlayers, playerID)
     fmt.Printf("Jugador %s eliminado de la lista de espera\n", playerID)
 }
