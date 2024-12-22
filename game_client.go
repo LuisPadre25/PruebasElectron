@@ -154,9 +154,9 @@ func (c *GameClient) Connect(serverAddr string) error {
 func (c *GameClient) connectToPeer(ip, port string) error {
     fmt.Printf("Iniciando hole punching con %s:%s\n", ip, port)
     
-    // 1. Crear socket UDP local (usando 0.0.0.0 para escuchar en todas las interfaces)
+    // 1. Crear socket UDP local
     localAddr := &net.UDPAddr{
-        IP:   net.IPv4zero,  // Cambiar esto
+        IP:   net.IPv4zero,
         Port: c.udpPort,
     }
     conn, err := net.ListenUDP("udp", localAddr)
@@ -170,7 +170,7 @@ func (c *GameClient) connectToPeer(ip, port string) error {
     }
     c.peerConn = conn
 
-    // Mostrar en qué puerto estamos escuchando
+    // Mostrar puerto local
     localAddr = conn.LocalAddr().(*net.UDPAddr)
     fmt.Printf("Escuchando en puerto local: %d\n", localAddr.Port)
 
@@ -180,52 +180,61 @@ func (c *GameClient) connectToPeer(ip, port string) error {
         return fmt.Errorf("error resolviendo peer: %v", err)
     }
 
-    // 3. Enviar paquetes de hole punching (más intentos)
-    fmt.Println("Enviando paquetes de hole punching...")
+    // Canales para sincronización
+    success := make(chan bool)
     done := make(chan bool)
+
+    // 3. Goroutine para enviar paquetes
     go func() {
-        for i := 0; i < 10; i++ {  // Aumentar intentos
-            msg := fmt.Sprintf("punch-%d", i)
-            conn.WriteToUDP([]byte(msg), peerAddr)
-            time.Sleep(200 * time.Millisecond)  // Más tiempo entre intentos
+        for i := 0; i < 20; i++ { // Más intentos
+            select {
+            case <-success:
+                return
+            default:
+                msg := fmt.Sprintf("punch-%d from %s:%d", i, c.publicIP, localAddr.Port)
+                conn.WriteToUDP([]byte(msg), peerAddr)
+                time.Sleep(100 * time.Millisecond)
+            }
         }
         done <- true
     }()
 
-    // 4. Esperar respuesta
-    fmt.Println("Esperando respuesta del peer...")
-    buffer := make([]byte, 1024)
-    conn.SetReadDeadline(time.Now().Add(10 * time.Second))  // Más tiempo de espera
-
-    // Canal para señalizar conexión exitosa
-    success := make(chan bool)
-
-    // Goroutine para leer respuestas
+    // 4. Goroutine para recibir paquetes
     go func() {
+        buffer := make([]byte, 1024)
         for {
+            conn.SetReadDeadline(time.Now().Add(15 * time.Second))
             n, remoteAddr, err := conn.ReadFromUDP(buffer)
             if err != nil {
-                fmt.Printf("Error leyendo: %v\n", err)
+                if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+                    fmt.Println("Timeout esperando respuesta")
+                } else {
+                    fmt.Printf("Error leyendo: %v\n", err)
+                }
                 success <- false
                 return
             }
 
-            fmt.Printf("Recibido de %v: %s\n", remoteAddr, string(buffer[:n]))
+            msg := string(buffer[:n])
+            fmt.Printf("Recibido de %v: %s\n", remoteAddr, msg)
 
-            // 5. Enviar respuesta
-            conn.WriteToUDP([]byte("¡Te escucho!"), remoteAddr)
+            // Enviar respuesta
+            response := fmt.Sprintf("reply from %s:%d", c.publicIP, localAddr.Port)
+            conn.WriteToUDP([]byte(response), remoteAddr)
+
+            // Señalizar éxito
             success <- true
-            
-            // 6. Seguir escuchando mensajes
+
+            // Seguir escuchando en background
             go func() {
                 buffer := make([]byte, 1024)
                 for {
                     n, addr, err := conn.ReadFromUDP(buffer)
                     if err != nil {
-                        fmt.Printf("Error leyendo: %v\n", err)
+                        fmt.Printf("Error en background: %v\n", err)
                         return
                     }
-                    fmt.Printf("Mensaje de %v: %s\n", addr, string(buffer[:n]))
+                    fmt.Printf("Background: mensaje de %v: %s\n", addr, string(buffer[:n]))
                 }
             }()
 
@@ -233,20 +242,19 @@ func (c *GameClient) connectToPeer(ip, port string) error {
         }
     }()
 
-    // Esperar resultado
+    // 5. Esperar resultado
     select {
-    case <-done:
-        fmt.Println("Terminaron los intentos de hole punching")
     case result := <-success:
         if result {
             fmt.Println("¡Conexión P2P establecida!")
             return nil
         }
-    case <-time.After(10 * time.Second):
+        return fmt.Errorf("error estableciendo conexión P2P")
+    case <-done:
+        return fmt.Errorf("terminaron los intentos sin éxito")
+    case <-time.After(15 * time.Second):
         return fmt.Errorf("timeout esperando conexión P2P")
     }
-
-    return fmt.Errorf("no se pudo establecer conexión P2P")
 }
 
 func main() {
