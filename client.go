@@ -18,6 +18,12 @@ type SignalMessage struct {
     Payload string `json:"payload"`
 }
 
+// Añadir nueva estructura para los roles
+type Role struct {
+    IsControlling bool
+    Name         string
+}
+
 func main() {
     // 1) Dirección del servidor de señalización
     serverURL := "ws://149.28.106.4:8080/ws"
@@ -86,6 +92,9 @@ func main() {
         }
     })
 
+    // Variable para almacenar el rol
+    var role Role
+
     // 6) Leer señales entrantes (offer, answer, candidates) por WebSocket
     var wg sync.WaitGroup
     wg.Add(1)
@@ -106,24 +115,36 @@ func main() {
             }
 
             switch msg.Type {
-            case "ready":
-                // Crear offer
-                log.Println("Servidor dice 'ready'. Creando offer...")
-                offer, err := peerConnection.CreateOffer(nil)
-                if err != nil {
-                    log.Println("Error creando offer:", err)
-                    return
-                }
-                if err := peerConnection.SetLocalDescription(offer); err != nil {
-                    log.Println("Error SetLocalDescription:", err)
-                    return
+            case "role":
+                // Nuevo caso para manejar la asignación de roles
+                if msg.Payload == "A" {
+                    role = Role{IsControlling: true, Name: "A"}
+                    log.Println("Eres el cliente A (controlling)")
+                } else {
+                    role = Role{IsControlling: false, Name: "B"}
+                    log.Println("Eres el cliente B (controlled)")
                 }
 
-                offerBytes, _ := json.Marshal(offer)
-                sendSignal(wsConn, SignalMessage{
-                    Type:    "offer",
-                    Payload: string(offerBytes),
-                })
+            case "ready":
+                // Solo el cliente A (controlling) crea la oferta
+                if role.IsControlling {
+                    log.Println("Servidor dice 'ready'. Creando offer...")
+                    offer, err := peerConnection.CreateOffer(nil)
+                    if err != nil {
+                        log.Println("Error creando offer:", err)
+                        return
+                    }
+                    if err := peerConnection.SetLocalDescription(offer); err != nil {
+                        log.Println("Error SetLocalDescription:", err)
+                        return
+                    }
+
+                    offerBytes, _ := json.Marshal(offer)
+                    sendSignal(wsConn, SignalMessage{
+                        Type:    "offer",
+                        Payload: string(offerBytes),
+                    })
+                }
 
             case "offer":
                 // Recibir la oferta
