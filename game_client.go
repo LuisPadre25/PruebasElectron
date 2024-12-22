@@ -1,115 +1,95 @@
 package main
 
 import (
-    "net"
     "fmt"
-    "time"
+    "net"
     "strings"
-    "strconv"
-    "math/rand"
+    "github.com/pion/stun/v2"
+    "bytes"
 )
 
 type GameClient struct {
-    // Conexiones P2P
-    peerConn net.Conn  // Conexión P2P principal
-    udpConn  net.Conn  // Para datos del juego
-    tcpConn  net.Conn  // Para datos importantes
+    // Info de red
+    localIP    string
+    publicIP   string
+    udpPort    int
+    tcpPort    int
 
-    // Info local
-    publicIP string
-    localIP  string
-    udpPort  int
-    tcpPort  int
+    // Conexiones
+    serverConn net.Conn  // Conexión al servidor
+    peerConn   net.Conn  // Conexión P2P con otro cliente
 }
 
-func (c *GameClient) Connect(serverAddr string) error {
-    // 1. Descubrir IPs usando STUN
-    if err := c.discoverAddresses(); err != nil {
-        return err
+func NewGameClient(udpPort, tcpPort int) *GameClient {
+    return &GameClient{
+        udpPort: udpPort,
+        tcpPort: tcpPort,
     }
-
-    // 2. Conectar al servidor de matchmaking
-    conn, err := net.Dial("tcp", serverAddr)
-    if err != nil {
-        return err
-    }
-    defer conn.Close() // Cerrar la conexión cuando terminemos
-
-    // 3. Enviar info y esperar oponente
-    playerInfo := fmt.Sprintf("%s,%s,%d,%d\n", c.localIP, c.publicIP, c.udpPort, c.tcpPort)
-    if _, err := conn.Write([]byte(playerInfo)); err != nil {
-        return fmt.Errorf("error enviando info: %v", err)
-    }
-
-    fmt.Println("Esperando oponente...")
-
-    // 4. Recibir info del oponente
-    buffer := make([]byte, 1024)
-    n, err := conn.Read(buffer)
-    if err != nil {
-        return fmt.Errorf("error recibiendo info del oponente: %v", err)
-    }
-
-    // Parsear info del oponente
-    peerInfo := strings.Split(string(buffer[:n]), ",")
-    if len(peerInfo) < 4 {
-        return fmt.Errorf("información del oponente incompleta")
-    }
-
-    peerUDPPort, _ := strconv.Atoi(strings.TrimSpace(peerInfo[2]))
-    peerTCPPort, _ := strconv.Atoi(strings.TrimSpace(peerInfo[3]))
-
-    fmt.Printf("\nOponente encontrado:\n")
-    fmt.Printf("IP Local: %s\n", peerInfo[0])
-    fmt.Printf("IP Pública: %s\n", peerInfo[1])
-    fmt.Printf("Puerto UDP: %d\n", peerUDPPort)
-    fmt.Printf("Puerto TCP: %d\n", peerTCPPort)
-
-    // Intentar establecer conexión P2P
-    return c.connectToPeer(fmt.Sprintf("%s:%d", peerInfo[1], peerUDPPort))
 }
 
-func (c *GameClient) connectToPeer(peerAddr string) error {
-    // 1. Intentar conexión directa
-    nat := NewNATTraversal()
-    conn, err := nat.Connect(peerAddr)
-    if err != nil {
-        fmt.Printf("Conexión directa falló: %v\n", err)
-        fmt.Println("Usando servidor como relay...")
-        
-        // 2. Si falla, usar el servidor como relay
-        return c.useServerRelay()
-    }
+// Descubrir IP pública usando STUN
+func (c *GameClient) discoverIP(stunServer string) error {
+    fmt.Printf("Conectando a servidor STUN %s...\n", stunServer)
     
-    c.peerConn = conn
-    return nil
-}
+    // Crear cliente STUN
+    client, err := stun.Dial("udp4", stunServer)
+    if err != nil {
+        return fmt.Errorf("error STUN dial: %v", err)
+    }
+    defer client.Close()
 
-func (c *GameClient) useServerRelay() error {
-    // Usar la conexión existente con el servidor para relay
-    fmt.Println("Modo relay activado")
-    return nil
-}
+    // Generar TransactionID único
+    tid := stun.NewTransactionID()
+    fmt.Printf("STUN: Usando TransactionID: %v\n", tid)
 
-func (c *GameClient) SendGameData(data []byte) error {
-    // Enviar datos del juego por UDP directamente al otro jugador
-    _, err := c.udpConn.Write(data)
-    return err
-}
+    // Enviar petición STUN
+    message := stun.MustBuild(
+        stun.TransactionID,
+        stun.BindingRequest,
+        stun.NewTransactionIDSetter(tid),
+    )
+    
+    // Obtener respuesta con nuestra IP pública
+    var xorAddr stun.XORMappedAddress
+    gotIP := false
 
-func (c *GameClient) SendReliableData(data []byte) error {
-    // Enviar datos importantes por TCP
-    _, err := c.tcpConn.Write(data)
-    return err
-}
+    if err := client.Do(message, func(res stun.Event) {
+        fmt.Printf("STUN: Recibida respuesta: %+v\n", res)
+        
+        if res.Error != nil {
+            err = res.Error
+            return
+        }
 
-func (c *GameClient) discoverAddresses() error {
+        // Verificar TransactionID
+        if !bytes.Equal(tid[:], res.Message.TransactionID[:]) {
+            fmt.Printf("STUN: TransactionID no coincide (esperado: %v, recibido: %v)\n",
+                tid, res.Message.TransactionID)
+            return
+        }
+
+        if getErr := xorAddr.GetFrom(res.Message); getErr != nil {
+            err = getErr
+            return
+        }
+
+        fmt.Printf("STUN: IP mapeada: %s:%d\n", xorAddr.IP, xorAddr.Port)
+        c.publicIP = xorAddr.IP.String()
+        gotIP = true
+    }); err != nil {
+        return fmt.Errorf("error STUN request: %v", err)
+    }
+
+    if !gotIP {
+        return fmt.Errorf("no se recibió respuesta STUN válida")
+    }
+
     // Obtener IP local
     addrs, err := net.InterfaceAddrs()
     if err != nil {
-        return err
+        return fmt.Errorf("error IP local: %v", err)
     }
-    
+
     for _, addr := range addrs {
         if ipnet, ok := addr.(*net.IPNet); ok && !ipnet.IP.IsLoopback() {
             if ipnet.IP.To4() != nil {
@@ -119,240 +99,88 @@ func (c *GameClient) discoverAddresses() error {
         }
     }
 
-    // Obtener IP pública usando STUN
-    stunConn, err := net.Dial("udp", "stun.l.google.com:19302")
-    if err != nil {
-        return fmt.Errorf("error conectando a STUN: %v", err)
-    }
-    defer stunConn.Close()
-
-    // Obtener la IP pública
-    if addr, ok := stunConn.LocalAddr().(*net.UDPAddr); ok {
-        c.publicIP = addr.IP.String()
-        fmt.Printf("IP pública obtenida: %s\n", c.publicIP)
-    } else {
-        return fmt.Errorf("no se pudo obtener la IP pública")
-    }
-
-    fmt.Printf("IPs descubiertas - Local: %s, Pública: %s\n", c.localIP, c.publicIP)
+    fmt.Printf("IPs descubiertas:\n")
+    fmt.Printf("Local: %s\n", c.localIP)
+    fmt.Printf("Pública: %s\n", c.publicIP)
     return nil
 }
 
-func (c *GameClient) discoverServer() (string, error) {
-    // Lista de métodos de descubrimiento
-    methods := []func() (string, error){
-        c.discoverByBroadcast,
-        c.discoverByLocalScan,
-        c.discoverByCommonIPs,
-    }
-
-    // Intentar cada método
-    var lastError error
-    for _, method := range methods {
-        serverAddr, err := method()
-        if err == nil {
-            return serverAddr, nil
-        }
-        lastError = err
-        fmt.Printf("Método de descubrimiento falló: %v\n", err)
-    }
-
-    return "", fmt.Errorf("no se pudo encontrar el servidor: %v", lastError)
-}
-
-func (c *GameClient) discoverByBroadcast() (string, error) {
-    fmt.Println("Intentando descubrir por broadcast...")
+// Conectar al servidor de matchmaking
+func (c *GameClient) Connect(serverAddr string) error {
+    fmt.Printf("Conectando a servidor de matchmaking %s...\n", serverAddr)
     
-    // Crear socket UDP
-    addr, err := net.ResolveUDPAddr("udp4", ":0")
+    // Conectar al servidor
+    conn, err := net.Dial("tcp", serverAddr)
     if err != nil {
-        return "", err
+        return fmt.Errorf("error conectando: %v", err)
     }
+    c.serverConn = conn
+
+    // Enviar nuestra info
+    info := fmt.Sprintf("%s,%s,%d,%d\n",
+        c.localIP, c.publicIP, c.udpPort, c.tcpPort)
     
-    conn, err := net.ListenUDP("udp4", addr)
-    if err != nil {
-        return "", err
-    }
-    defer conn.Close()
-
-    // Habilitar broadcast
-    conn.SetWriteBuffer(1024)
-    
-    // Enviar broadcast a todas las interfaces de red
-    interfaces, err := net.Interfaces()
-    if err != nil {
-        return "", err
+    if _, err := conn.Write([]byte(info)); err != nil {
+        return fmt.Errorf("error enviando info: %v", err)
     }
 
-    message := []byte("DISCOVER_GAME_SERVER")
-    for _, iface := range interfaces {
-        addrs, err := iface.Addrs()
-        if err != nil {
-            continue
-        }
+    fmt.Println("Esperando oponente...")
 
-        for _, addr := range addrs {
-            if ipnet, ok := addr.(*net.IPNet); ok {
-                if ipv4 := ipnet.IP.To4(); ipv4 != nil {
-                    // Obtener dirección de broadcast para esta red
-                    broadcast := getBroadcastAddress(ipnet)
-                    broadcastAddr := &net.UDPAddr{
-                        IP:   broadcast,
-                        Port: 5001,
-                    }
-                    
-                    // Enviar mensaje de descubrimiento
-                    conn.WriteToUDP(message, broadcastAddr)
-                }
-            }
-        }
-    }
-
-    // Esperar respuesta
+    // Esperar info del oponente
     buffer := make([]byte, 1024)
-    conn.SetReadDeadline(time.Now().Add(2 * time.Second))
-    n, _, err := conn.ReadFromUDP(buffer)
+    n, err := conn.Read(buffer)
     if err != nil {
-        return "", err
+        return fmt.Errorf("error recibiendo info: %v", err)
     }
 
-    return string(buffer[:n]), nil
+    // Parsear info del oponente
+    parts := strings.Split(strings.TrimSpace(string(buffer[:n])), ",")
+    if len(parts) != 4 {
+        return fmt.Errorf("formato inválido del oponente")
+    }
+
+    fmt.Printf("\nOponente encontrado:\n")
+    fmt.Printf("IP Local: %s\n", parts[0])
+    fmt.Printf("IP Pública: %s\n", parts[1])
+    fmt.Printf("UDP: %s\n", parts[2])
+    fmt.Printf("TCP: %s\n", parts[3])
+
+    // Intentar conexión P2P
+    return c.connectToPeer(parts[1], parts[2])
 }
 
-func getBroadcastAddress(n *net.IPNet) net.IP {
-    if len(n.IP) == 4 {
-        mask := n.Mask
-        broadcast := make(net.IP, 4)
-        for i := range broadcast {
-            broadcast[i] = n.IP[i] | ^mask[i]
-        }
-        return broadcast
+// Intentar conexión P2P con el otro cliente
+func (c *GameClient) connectToPeer(ip, port string) error {
+    fmt.Printf("Intentando conexión P2P a %s:%s\n", ip, port)
+    
+    conn, err := net.Dial("udp", fmt.Sprintf("%s:%s", ip, port))
+    if err != nil {
+        return fmt.Errorf("error P2P: %v", err)
     }
+    c.peerConn = conn
+
+    fmt.Println("¡Conexión P2P establecida!")
     return nil
 }
 
-func (c *GameClient) discoverByLocalScan() (string, error) {
-    fmt.Println("Escaneando red local...")
-    
-    // Obtener IP local
-    localIP := c.getLocalIPPrefix()
-    if localIP == "" {
-        return "", fmt.Errorf("no se pudo obtener IP local")
-    }
-
-    // Escanear IPs en la red local
-    for i := 1; i < 255; i++ {
-        targetIP := fmt.Sprintf("%s%d", localIP, i)
-        if c.tryServerConnection(targetIP) {
-            return fmt.Sprintf("%s:5000", targetIP), nil
-        }
-    }
-
-    return "", fmt.Errorf("no se encontró servidor en la red local")
-}
-
-func (c *GameClient) getLocalIPPrefix() string {
-    addrs, err := net.InterfaceAddrs()
-    if err != nil {
-        return ""
-    }
-
-    for _, addr := range addrs {
-        if ipnet, ok := addr.(*net.IPNet); ok && !ipnet.IP.IsLoopback() {
-            if ipv4 := ipnet.IP.To4(); ipv4 != nil {
-                // Devolver los primeros 3 octetos de la IP
-                parts := strings.Split(ipv4.String(), ".")
-                if len(parts) == 4 {
-                    return fmt.Sprintf("%s.%s.%s.", parts[0], parts[1], parts[2])
-                }
-            }
-        }
-    }
-    return ""
-}
-
-func (c *GameClient) discoverByCommonIPs() (string, error) {
-    fmt.Println("Probando IPs comunes...")
-    
-    // Obtener el prefijo de la red local
-    localPrefix := c.getLocalIPPrefix()
-    
-    commonIPs := []string{
-        "127.0.0.1",          // localhost
-        "192.168.1.1",        // Router común
-        "192.168.0.1",        // Router común
-        "192.168.68.109",     // Tu IP actual
-    }
-
-    // Agregar IPs de la red local
-    if localPrefix != "" {
-        for i := 1; i < 10; i++ {
-            commonIPs = append(commonIPs, fmt.Sprintf("%s%d", localPrefix, i))
-        }
-    }
-
-    for _, ip := range commonIPs {
-        fmt.Printf("Probando %s...\n", ip)
-        if c.tryServerConnection(ip) {
-            return fmt.Sprintf("%s:5000", ip), nil
-        }
-    }
-
-    return "", fmt.Errorf("no se encontró servidor en IPs comunes")
-}
-
-func (c *GameClient) tryServerConnection(ip string) bool {
-    addr := fmt.Sprintf("%s:5000", ip)
-    conn, err := net.DialTimeout("tcp", addr, time.Second)
-    if err != nil {
-        fmt.Printf("No se pudo conectar a %s: %v\n", addr, err)
-        return false
-    }
-    conn.Close()
-    fmt.Printf("¡Servidor encontrado en %s!\n", addr)
-    return true
-}
-
-// Función principal para usar el cliente
 func main() {
-    fmt.Println("\n=== Cliente de Juegos P2P ===")
+    fmt.Println("\n=== Cliente P2P ===")
     
-    // Generar puertos aleatorios entre 30000 y 40000
-    udpPort := 30000 + rand.Intn(10000)
-    tcpPort := udpPort + 1
-    
-    client := &GameClient{
-        udpPort: udpPort,
-        tcpPort: tcpPort,
-    }
+    // Usar puertos aleatorios para evitar conflictos
+    client := NewGameClient(35000, 35001)
 
-    fmt.Printf("Usando puertos - UDP: %d, TCP: %d\n", udpPort, tcpPort)
-
-    // Permitir especificar IP manualmente
-    fmt.Print("Ingrese la IP del servidor (192.168.11.150): ")
-    var input string
-    fmt.Scanln(&input)
-    if input == "" {
-        input = "192.168.11.150"
-    }
-
-    // Agregar el puerto si no está especificado
-    if !strings.Contains(input, ":") {
-        input = input + ":5000"
-    }
-
-    // Intentar conectar
-    fmt.Printf("Conectando a %s...\n", input)
-    err := client.Connect(input)
-    if err != nil {
-        fmt.Printf("Error conectando: %v\n", err)
-        fmt.Println("\nPresiona Enter para salir...")
-        fmt.Scanln()
+    // 1. Descubrir IP usando STUN (IP de tu servidor Vultr)
+    if err := client.discoverIP("149.28.106.4:3478"); err != nil {
+        fmt.Printf("Error STUN: %v\n", err)
         return
     }
 
-    fmt.Println("Conectado exitosamente!")
-    
+    // 2. Conectar al servidor de matchmaking
+    if err := client.Connect("149.28.106.4:5000"); err != nil {
+        fmt.Printf("Error conexión: %v\n", err)
+        return
+    }
+
     fmt.Println("\nPresiona Enter para salir...")
     fmt.Scanln()
 } 
