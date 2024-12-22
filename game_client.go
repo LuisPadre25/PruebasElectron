@@ -7,6 +7,7 @@ import (
     "bytes"
     "time"
     "github.com/pion/stun/v2"
+    "github.com/pion/turn/v2"
 )
 
 type GameClient struct {
@@ -19,6 +20,7 @@ type GameClient struct {
     // Conexiones
     serverConn net.Conn  // Conexión al servidor
     peerConn   net.Conn  // Conexión P2P con otro cliente
+    turnConn net.Conn  // Para relay TURN
 }
 
 func NewGameClient(udpPort, tcpPort int) *GameClient {
@@ -152,7 +154,51 @@ func (c *GameClient) Connect(serverAddr string) error {
 
 // Intentar conexión P2P con el otro cliente
 func (c *GameClient) connectToPeer(ip, port string) error {
-    fmt.Printf("Iniciando hole punching con %s:%s\n", ip, port)
+    fmt.Printf("Iniciando conexión con %s:%s\n", ip, port)
+    
+    // 1. Intentar conexión directa
+    if err := c.connectDirect(ip, port); err != nil {
+        fmt.Printf("Conexión directa falló: %v\n", err)
+        fmt.Println("Intentando TURN relay...")
+        return c.connectViaTURN(ip, port)
+    }
+    return nil
+}
+
+func (c *GameClient) connectViaTURN(ip, port string) error {
+    // Conectar al servidor TURN
+    turnServer := "149.28.106.4:3478"
+    turnConfig := &turn.ClientConfig{
+        STUNServerAddr: turnServer,
+        TURNServerAddr: turnServer,
+        Username:     "gameuser",
+        Password:     "gamepass",
+        Realm:       "game.example.com",
+    }
+
+    // Crear conexión TURN
+    conn, err := turn.NewClient(turnConfig)
+    if err != nil {
+        return fmt.Errorf("error TURN: %v", err)
+    }
+    defer conn.Close()
+
+    // Obtener dirección relay
+    relayConn, err := conn.Allocate()
+    if err != nil {
+        return fmt.Errorf("error TURN allocate: %v", err)
+    }
+
+    fmt.Printf("TURN: Usando relay %v\n", relayConn.LocalAddr())
+    c.turnConn = relayConn
+
+    // El resto de la comunicación va a través de relayConn
+    return nil
+}
+
+// Agregar esta función
+func (c *GameClient) connectDirect(ip, port string) error {
+    fmt.Printf("Intentando conexión directa con %s:%s\n", ip, port)
     
     // 1. Crear socket UDP local
     localAddr := &net.UDPAddr{
@@ -180,96 +226,36 @@ func (c *GameClient) connectToPeer(ip, port string) error {
         return fmt.Errorf("error resolviendo peer: %v", err)
     }
 
-    // Canales para sincronización
-    success := make(chan bool)
-    done := make(chan bool)
-
-    // 3. Goroutine para enviar paquetes
-    go func() {
-        for i := 0; i < 20; i++ { // Más intentos
-            select {
-            case <-success:
-                return
-            default:
-                msg := fmt.Sprintf("punch-%d from %s:%d", i, c.publicIP, localAddr.Port)
-                conn.WriteToUDP([]byte(msg), peerAddr)
-                time.Sleep(100 * time.Millisecond)
-            }
-        }
-        done <- true
-    }()
-
-    // 4. Goroutine para recibir paquetes
-    go func() {
-        buffer := make([]byte, 1024)
-        for {
-            conn.SetReadDeadline(time.Now().Add(15 * time.Second))
-            n, remoteAddr, err := conn.ReadFromUDP(buffer)
-            if err != nil {
-                if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
-                    fmt.Println("Timeout esperando respuesta")
-                } else {
-                    fmt.Printf("Error leyendo: %v\n", err)
-                }
-                success <- false
-                return
-            }
-
-            msg := string(buffer[:n])
-            fmt.Printf("Recibido de %v: %s\n", remoteAddr, msg)
-
-            // Enviar respuesta
-            response := fmt.Sprintf("reply from %s:%d", c.publicIP, localAddr.Port)
-            conn.WriteToUDP([]byte(response), remoteAddr)
-
-            // Señalizar éxito
-            success <- true
-
-            // Seguir escuchando en background
-            go func() {
-                buffer := make([]byte, 1024)
-                for {
-                    n, addr, err := conn.ReadFromUDP(buffer)
-                    if err != nil {
-                        fmt.Printf("Error en background: %v\n", err)
-                        return
-                    }
-                    fmt.Printf("Background: mensaje de %v: %s\n", addr, string(buffer[:n]))
-                }
-            }()
-
-            return
-        }
-    }()
-
-    // 5. Esperar resultado
-    select {
-    case result := <-success:
-        if result {
-            fmt.Println("¡Conexión P2P establecida!")
-            return nil
-        }
-        return fmt.Errorf("error estableciendo conexión P2P")
-    case <-done:
-        return fmt.Errorf("terminaron los intentos sin éxito")
-    case <-time.After(15 * time.Second):
-        return fmt.Errorf("timeout esperando conexión P2P")
+    // 3. Intentar conexión directa
+    fmt.Println("Enviando mensaje de prueba...")
+    if _, err := conn.WriteToUDP([]byte("test"), peerAddr); err != nil {
+        return fmt.Errorf("error enviando: %v", err)
     }
+
+    // 4. Esperar respuesta
+    buffer := make([]byte, 1024)
+    conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+    _, _, err = conn.ReadFromUDP(buffer)
+    if err != nil {
+        return fmt.Errorf("conexión directa falló: %v", err)
+    }
+
+    fmt.Println("¡Conexión directa establecida!")
+    return nil
 }
 
 func main() {
     fmt.Println("\n=== Cliente P2P ===")
     
-    // Usar puertos aleatorios para evitar conflictos
     client := NewGameClient(35000, 35001)
 
-    // 1. Descubrir IP usando STUN (IP de tu servidor Vultr)
-    if err := client.discoverIP("149.28.106.4:3478"); err != nil {
+    // Usar puerto 3479 para STUN
+    if err := client.discoverIP("149.28.106.4:3479"); err != nil {
         fmt.Printf("Error STUN: %v\n", err)
         return
     }
 
-    // 2. Conectar al servidor de matchmaking
+    // Puerto 5000 para matchmaking sigue igual
     if err := client.Connect("149.28.106.4:5000"); err != nil {
         fmt.Printf("Error conexión: %v\n", err)
         return

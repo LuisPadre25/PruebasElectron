@@ -37,7 +37,7 @@ func NewServer() *Server {
 
 // Iniciar servidor STUN
 func (s *Server) startSTUN() error {
-    addr, err := net.ResolveUDPAddr("udp4", ":3478")
+    addr, err := net.ResolveUDPAddr("udp4", ":3479")
     if err != nil {
         return fmt.Errorf("error STUN addr: %v", err)
     }
@@ -121,7 +121,7 @@ func (s *Server) Start() error {
 
     fmt.Println("=== Servidor P2P ===")
     fmt.Println("Matchmaking: :5000")
-    fmt.Println("STUN: :3478")
+    fmt.Println("STUN: :3479")
 
     for {
         conn, err := listener.Accept()
