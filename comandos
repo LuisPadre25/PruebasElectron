@@ -1,0 +1,6 @@
+sudo systemctl enable coturn
+sudo systemctl start coturn
+
+
+:::
+
