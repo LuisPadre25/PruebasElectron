@@ -4,8 +4,9 @@ import (
     "fmt"
     "net"
     "strings"
-    "github.com/pion/stun/v2"
     "bytes"
+    "time"
+    "github.com/pion/stun/v2"
 )
 
 type GameClient struct {
@@ -159,7 +160,36 @@ func (c *GameClient) connectToPeer(ip, port string) error {
     }
     c.peerConn = conn
 
-    fmt.Println("¡Conexión P2P establecida!")
+    // Enviar mensaje de prueba
+    fmt.Println("Enviando mensaje de prueba...")
+    if _, err := conn.Write([]byte("¡Hola! ¿Me escuchas?")); err != nil {
+        return fmt.Errorf("error enviando: %v", err)
+    }
+
+    // Esperar respuesta
+    buffer := make([]byte, 1024)
+    conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+    n, err := conn.Read(buffer)
+    if err != nil {
+        return fmt.Errorf("error recibiendo respuesta: %v", err)
+    }
+
+    fmt.Printf("Recibido del peer: %s\n", string(buffer[:n]))
+    fmt.Println("¡Conexión P2P verificada!")
+
+    // Iniciar goroutine para escuchar mensajes
+    go func() {
+        buffer := make([]byte, 1024)
+        for {
+            n, err := conn.Read(buffer)
+            if err != nil {
+                fmt.Printf("Error leyendo del peer: %v\n", err)
+                return
+            }
+            fmt.Printf("Mensaje del peer: %s\n", string(buffer[:n]))
+        }
+    }()
+
     return nil
 }
 
